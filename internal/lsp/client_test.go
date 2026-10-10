@@ -1,7 +1,4 @@
-//go:build pending
-
 // Acceptance tests for the JSON-RPC / LSP client.
-// Remove the build constraint above once the code under test exists.
 package lsp_test
 
 import (
@@ -10,6 +7,7 @@ import (
 	"errors"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -514,4 +512,98 @@ func waitFor(t *testing.T, s *lspfake.Server, method string) lspfake.Message {
 	}
 	t.Fatalf("server never received %s", method)
 	return lspfake.Message{}
+}
+
+func TestServerRequestReplies(t *testing.T) {
+	s := lspfake.New()
+	got := make(chan string, 3)
+	s.Handle("textDocument/definition", func(ctx context.Context, _ json.RawMessage) (any, error) {
+		for _, call := range []struct {
+			method string
+			params any
+		}{
+			{"workspace/configuration", map[string]any{"items": []any{map[string]any{}, map[string]any{}}}},
+			{"client/registerCapability", map[string]any{"registrations": []any{}}},
+			{"window/showMessageRequest", map[string]any{"type": 1, "message": "?"}},
+		} {
+			res, err := s.Call(ctx, call.method, call.params)
+			if err != nil {
+				return nil, err
+			}
+			got <- call.method + "=" + string(res)
+		}
+		return nil, nil
+	})
+	sess := connect(t, s)
+	if _, err := sess.client.Definition(ctx5(t), "file:///a.go", pos(0, 0)); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"workspace/configuration=[null,null]", "client/registerCapability=null", "window/showMessageRequest=null"}
+	for _, w := range want {
+		if g := <-got; g != w {
+			t.Errorf("reply %q, want %q", g, w)
+		}
+	}
+}
+
+func TestDocumentSymbolsFlatFallback(t *testing.T) {
+	s := lspfake.New()
+	r := map[string]any{"start": map[string]int{"line": 3, "character": 5}, "end": map[string]int{"line": 3, "character": 9}}
+	s.Result("textDocument/documentSymbol", []any{
+		map[string]any{"name": "Rect", "kind": 23, "location": map[string]any{"uri": "file:///a.go", "range": r}},
+	})
+	sess := connect(t, s)
+	syms, err := sess.client.DocumentSymbols(ctx5(t), "file:///a.go")
+	want := lsp.Range{Start: pos(3, 5), End: pos(3, 9)}
+	if err != nil || len(syms) != 1 || syms[0].Name != "Rect" || syms[0].Range != want || syms[0].SelectionRange != want {
+		t.Errorf("DocumentSymbols = %+v, %v", syms, err)
+	}
+}
+
+func TestMalformedResults(t *testing.T) {
+	s := lspfake.New()
+	s.Result("textDocument/definition", 42)
+	s.Result("textDocument/hover", map[string]any{"contents": 42})
+	s.Result("textDocument/documentSymbol", "nope")
+	sess := connect(t, s)
+	ctx := ctx5(t)
+	if _, err := sess.client.Definition(ctx, "file:///a.go", pos(0, 0)); err == nil {
+		t.Error("Definition accepted a number")
+	}
+	if _, err := sess.client.Hover(ctx, "file:///a.go", pos(0, 0)); err == nil {
+		t.Error("Hover accepted a number")
+	}
+	if _, err := sess.client.DocumentSymbols(ctx, "file:///a.go"); err == nil {
+		t.Error("DocumentSymbols accepted a string")
+	}
+}
+
+func TestCloseTwice(t *testing.T) {
+	sess := sample(t)
+	first := sess.client.Close(ctx5(t))
+	if second := sess.client.Close(ctx5(t)); first != nil || second != nil {
+		t.Errorf("Close = %v, then %v; want nil both times", first, second)
+	}
+	if got := sess.server.Requests("shutdown"); len(got) != 1 {
+		t.Errorf("shutdown sent %d times, want 1", len(got))
+	}
+}
+
+func TestStartReportsServerStderr(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("needs sh")
+	}
+	_, err := lsp.Start(ctx5(t), []string{"sh", "-c", "echo 'fatal: no go.mod' >&2; exit 3"}, t.TempDir())
+	if err == nil {
+		t.Fatal("Start succeeded for a server that exits immediately")
+	}
+	if !strings.Contains(err.Error(), "fatal: no go.mod") {
+		t.Errorf("error %q should include the server's stderr", err)
+	}
+}
+
+func TestStartEmptyCommand(t *testing.T) {
+	if _, err := lsp.Start(ctx5(t), nil, t.TempDir()); err == nil {
+		t.Error("Start(nil) succeeded")
+	}
 }
