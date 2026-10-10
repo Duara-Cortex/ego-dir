@@ -52,7 +52,7 @@ ego-dir find_references    --file main.go --line 10 --col 6
 | `--col`       | (required) | **1-based** column in characters (runes). Converted to LSP UTF-16 internally. |
 | `--depth`     | `1`        | Hop radius `k` (1–5).                                                        |
 | `--format`    | `md`       | `md` or `json`.                                                              |
-| `--edges`     | all        | Comma list of `calls,implements,instantiates,imports,references`.            |
+| `--edges`     | see note   | Comma list of `calls,implements,instantiates,imports,references`, or `all`. Default: all except `references`. |
 | `--direction` | `both`     | `in` (callers/upstream), `out` (callees/downstream) or `both`.               |
 | `--body`      | `ego`      | Include bodies for `ego`, `all` or `none`.                                   |
 | `--root`      | cwd        | Workspace root passed to the language server.                                |
@@ -60,7 +60,8 @@ ego-dir find_references    --file main.go --line 10 --col 6
 | `--timeout`   | `30s`      | Overall deadline.                                                            |
 
 Results go to stdout. Diagnostics go to stderr. The exit code is `0` on success, `1` on a
-usage error and `2` on an LSP or runtime error.
+usage error (bad flags, missing file, position outside the file) and `2` on an LSP or runtime
+error.
 
 ## Architecture
 
@@ -83,6 +84,7 @@ go test ./...                       # unit tests, offline, using an in-process f
 go test -tags integration ./...     # also runs real-server tests (skipped if gopls is missing)
 
 make test                           # go vet + go test -race (what CI runs)
+make pending                        # acceptance tests for code not written yet (expected to fail)
 VERSION=v0.1.0 make package         # cross-compile to dist/*.tar.gz + dist/checksums.txt
 ```
 

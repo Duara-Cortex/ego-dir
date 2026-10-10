@@ -1,5 +1,5 @@
 // Command ego-dir gives AI agents graph-augmented code intelligence on top of
-// language servers. Subcommands are added in later phases.
+// language servers.
 package main
 
 import (
