@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rasJacobCharles/ego-dir/internal/lsp"
-	"github.com/rasJacobCharles/ego-dir/internal/lsp/lspfake"
+	"github.com/Duara-Cortex/ego-dir/internal/lsp"
+	"github.com/Duara-Cortex/ego-dir/internal/lsp/lspfake"
 )
 
 func TestMain(m *testing.M) {
@@ -605,5 +605,73 @@ func TestStartReportsServerStderr(t *testing.T) {
 func TestStartEmptyCommand(t *testing.T) {
 	if _, err := lsp.Start(ctx5(t), nil, t.TempDir()); err == nil {
 		t.Error("Start(nil) succeeded")
+	}
+}
+
+// specificationServer answers only the specification's spelling of the
+// handshake, as gopls, pyright and rust-analyzer do: any other request
+// before initialisation is an error.
+func specificationServer() *lspfake.Server {
+	s := lspfake.New()
+	s.Handle("initialise", func(context.Context, json.RawMessage) (any, error) {
+		return nil, &lspfake.Error{Code: -32002, Message: "server not initialized"}
+	})
+	s.Result("initialize", map[string]any{"capabilities": map[string]any{}})
+	return s
+}
+
+func TestHandshakeFallsBackToSpecificationSpelling(t *testing.T) {
+	sess := connect(t, specificationServer())
+	if err := sess.client.Close(ctx5(t)); err != nil {
+		t.Fatal(err)
+	}
+	<-sess.done
+	want := []string{"initialise", "initialize", "initialized", "shutdown", "exit"}
+	if got := sess.server.Methods(); !reflect.DeepEqual(got, want) {
+		t.Errorf("methods = %v, want %v", got, want)
+	}
+	if !sess.server.Requests("initialized")[0].IsNotification() {
+		t.Error("initialized must be a notification")
+	}
+}
+
+func TestHandshakeNotRetriedWhenAccepted(t *testing.T) {
+	sess := sample(t)
+	if n := len(sess.server.Requests("initialize")); n != 0 {
+		t.Errorf("sent initialize %d times to a server that accepted initialise", n)
+	}
+}
+
+func TestHandshakeBothSpellingsFail(t *testing.T) {
+	s := specificationServer()
+	s.Handle("initialize", func(context.Context, json.RawMessage) (any, error) {
+		return nil, &lspfake.Error{Code: -32603, Message: "no go.mod found"}
+	})
+	clientEnd, serverEnd := net.Pipe()
+	defer clientEnd.Close()
+	defer serverEnd.Close()
+	go s.Serve(context.Background(), serverEnd)
+	_, err := lsp.NewClient(ctx5(t), clientEnd, t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "server not initialized") || !strings.Contains(err.Error(), "no go.mod found") {
+		t.Errorf("error = %v, want both servers' messages", err)
+	}
+}
+
+func TestHandshakeNoRetryAfterSessionFailure(t *testing.T) {
+	s := lspfake.New()
+	var serverEnd net.Conn
+	s.Handle("initialise", func(context.Context, json.RawMessage) (any, error) {
+		serverEnd.Close()
+		return nil, nil
+	})
+	var clientEnd net.Conn
+	clientEnd, serverEnd = net.Pipe()
+	defer clientEnd.Close()
+	go s.Serve(context.Background(), serverEnd)
+	if _, err := lsp.NewClient(ctx5(t), clientEnd, t.TempDir()); err == nil {
+		t.Fatal("NewClient succeeded on a dead connection")
+	}
+	if n := len(s.Requests("initialize")); n != 0 {
+		t.Errorf("retried %d times on a dead connection", n)
 	}
 }

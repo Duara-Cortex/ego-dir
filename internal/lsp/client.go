@@ -13,14 +13,21 @@ import (
 	"sync"
 )
 
-// Lifecycle methods. Project convention is British spelling, which differs
-// from the specification's spelling of the first two.
+// Lifecycle methods.
 const (
-	methodInitialise  = "initialise"
-	methodInitialised = "initialised"
-	methodShutdown    = "shutdown"
-	methodExit        = "exit"
+	methodShutdown = "shutdown"
+	methodExit     = "exit"
 )
+
+// handshake is one spelling of the initialise request and its matching
+// notification.
+type handshake struct{ request, notification string }
+
+// handshakes are tried in order until the server accepts one.
+var handshakes = []handshake{
+	{"initialise", "initialised"},
+	{"initialize", "initialized"},
+}
 
 // Client is a read-only LSP client for one workspace.
 type Client struct {
@@ -99,16 +106,25 @@ func NewClient(ctx context.Context, rwc io.ReadWriteCloser, root string) (*Clien
 		WorkspaceFolders: []WorkspaceFolder{{URI: rootURI, Name: filepath.Base(root)}},
 		Capabilities:     clientCapabilities,
 	}
-	var result InitialiseResult
-	if err := c.conn.call(ctx, methodInitialise, params, &result); err != nil {
-		_ = c.conn.close()
-		return nil, fmt.Errorf("initialise language server: %w", err)
+	var errs []error
+	for _, h := range handshakes {
+		var result InitialiseResult
+		err := c.conn.call(ctx, h.request, params, &result)
+		if err == nil {
+			if err := c.conn.notify(h.notification, struct{}{}); err != nil {
+				_ = c.conn.close()
+				return nil, fmt.Errorf("initialise language server: %w", err)
+			}
+			return c, nil
+		}
+		errs = append(errs, fmt.Errorf("%s: %w", h.request, err))
+		var rpcErr *RPCError
+		if !errors.As(err, &rpcErr) {
+			break // the session failed; another spelling cannot help
+		}
 	}
-	if err := c.conn.notify(methodInitialised, struct{}{}); err != nil {
-		_ = c.conn.close()
-		return nil, fmt.Errorf("initialise language server: %w", err)
-	}
-	return c, nil
+	_ = c.conn.close()
+	return nil, fmt.Errorf("initialise language server: %w", errors.Join(errs...))
 }
 
 // answerServerRequest replies to requests a server sends to the client.

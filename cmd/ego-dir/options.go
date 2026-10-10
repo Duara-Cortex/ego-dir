@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rasJacobCharles/ego-dir/internal/graph"
-	"github.com/rasJacobCharles/ego-dir/internal/lsp"
+	"github.com/Duara-Cortex/ego-dir/internal/graph"
+	"github.com/Duara-Cortex/ego-dir/internal/lsp"
 )
 
 // defaultEdges leaves out references: with call hierarchy available they

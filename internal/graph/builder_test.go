@@ -9,7 +9,7 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/rasJacobCharles/ego-dir/internal/graph"
+	"github.com/Duara-Cortex/ego-dir/internal/graph"
 )
 
 // fakeSource is an in-memory SymbolSource over a fixed set of edges.

@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rasJacobCharles/ego-dir/internal/lsp/lspfake"
+	"github.com/Duara-Cortex/ego-dir/internal/lsp/lspfake"
 )
 
 func TestMain(m *testing.M) {

@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rasJacobCharles/ego-dir/internal/graph"
-	"github.com/rasJacobCharles/ego-dir/internal/lsp"
-	"github.com/rasJacobCharles/ego-dir/internal/lsp/lspfake"
-	"github.com/rasJacobCharles/ego-dir/internal/lspsource"
+	"github.com/Duara-Cortex/ego-dir/internal/graph"
+	"github.com/Duara-Cortex/ego-dir/internal/lsp"
+	"github.com/Duara-Cortex/ego-dir/internal/lsp/lspfake"
+	"github.com/Duara-Cortex/ego-dir/internal/lspsource"
 )
 
 var defaultKinds = []graph.EdgeKind{graph.EdgeCalls, graph.EdgeImplements, graph.EdgeInstantiates, graph.EdgeImports}

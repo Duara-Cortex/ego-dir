@@ -20,7 +20,7 @@ Markdown (or JSON) report of that symbol, the **ego**, and its neighbours, the *
 ## Install
 
 **From a release** (no Go needed). Download the archive for your platform and
-`checksums.txt` from the [releases page](https://github.com/rasJacobCharles/ego-dir/releases), then:
+`checksums.txt` from the [releases page](https://github.com/Duara-Cortex/ego-dir/releases), then:
 
 ```sh
 shasum -a 256 -c checksums.txt --ignore-missing     # verify the download
@@ -31,7 +31,7 @@ install -m 0755 ego-dir_v0.1.0_darwin_arm64/ego-dir ~/.local/bin/   # or any dir
 **With Go** (1.26 or later):
 
 ```sh
-go install github.com/rasJacobCharles/ego-dir/cmd/ego-dir@latest
+go install github.com/Duara-Cortex/ego-dir/cmd/ego-dir@latest
 ```
 
 `ego-dir version` reports `dev` for this route; release archives and `make install` carry the version.
