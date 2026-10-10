@@ -17,6 +17,40 @@ Markdown (or JSON) report of that symbol, the **ego**, and its neighbours, the *
 - **Read-only.** Ego-dir never edits files. It only asks the language server questions.
 - **Single static binary.** No runtime dependencies besides the language server for your language.
 
+## Install
+
+**From a release** (no Go needed). Download the archive for your platform and
+`checksums.txt` from the [releases page](https://github.com/rasJacobCharles/ego-dir/releases), then:
+
+```sh
+shasum -a 256 -c checksums.txt --ignore-missing     # verify the download
+tar -xzf ego-dir_v0.1.0_darwin_arm64.tar.gz
+install -m 0755 ego-dir_v0.1.0_darwin_arm64/ego-dir ~/.local/bin/   # or any directory on your PATH
+```
+
+**With Go** (1.26 or later):
+
+```sh
+go install github.com/rasJacobCharles/ego-dir/cmd/ego-dir@latest
+```
+
+`ego-dir version` reports `dev` for this route; release archives and `make install` carry the version.
+
+**From source:**
+
+```sh
+VERSION=v0.1.0 make install                         # installs into ~/.local/bin (override with INSTALL_DIR=...)
+```
+
+If `~/.local/bin` is not on your PATH (macOS does not add it by default), add it to your
+shell profile (`~/.zshrc` or `~/.bashrc`):
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Then install the language server for your language (see below).
+
 ## Supported language servers
 
 The server is chosen by file extension. Use `--server "<cmd> <args>"` to override it.
@@ -83,7 +117,10 @@ go vet ./...
 go test ./...                       # unit tests, offline, using an in-process fake LSP server
 go test -tags integration ./...     # also runs real-server tests (skipped if gopls is missing)
 
+make build                          # build dist/ego-dir for this machine (VERSION=v0.1.0 make build to stamp a version)
+make install                        # install ego-dir into ~/.local/bin (override with INSTALL_DIR=...)
 make test                           # go vet + go test -race (what CI runs)
+make integration                    # tests against real language servers (skipped when not installed)
 make pending                        # acceptance tests for code not written yet (expected to fail)
 VERSION=v0.1.0 make package         # cross-compile to dist/*.tar.gz + dist/checksums.txt
 ```

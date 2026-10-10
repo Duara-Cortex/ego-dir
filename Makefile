@@ -4,11 +4,18 @@ VERSION   ?= dev
 DIST      := dist
 PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64
 LDFLAGS   := -s -w -X main.version=$(VERSION)
+INSTALL_DIR?=$(HOME)/.local/bin
 
-.PHONY: build test pending integration package clean
+.PHONY: build install test pending integration package clean
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY) $(PKG)
+
+# Copy the binary into INSTALL_DIR (default ~/.local/bin) so it can be called from anywhere.
+install: build
+	@mkdir -p $(INSTALL_DIR)
+	cp $(DIST)/$(BINARY) $(INSTALL_DIR)/$(BINARY)
+	@echo "Installed $(BINARY) to $(INSTALL_DIR)/$(BINARY)"
 
 test:
 	go vet ./...
