@@ -211,8 +211,6 @@ files it makes pass, and `make test` (and CI) runs them from then on.
 
 | Area                    | Files                                                                         |
 |-------------------------|-------------------------------------------------------------------------------|
-| Graph data structures   | `internal/graph/model_test.go`                                                |
-| LSP protocol types      | `internal/lsp/protocol_test.go`                                               |
 | JSON-RPC / LSP client   | `internal/lsp/client_test.go`                                                 |
 | Graph builder           | `internal/graph/builder_test.go`                                              |
 | LSP-backed source       | `internal/lspsource/source_test.go`, `internal/lspsource/gopls_integration_test.go` (also `integration`) |

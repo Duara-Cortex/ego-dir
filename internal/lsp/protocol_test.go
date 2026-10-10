@@ -1,7 +1,4 @@
-//go:build pending
-
 // Acceptance tests for the LSP protocol structs, positions and URIs.
-// Remove the build constraint above once the code under test exists.
 package lsp_test
 
 import (
@@ -143,4 +140,56 @@ func jsonEqual(a, b any) bool {
 	x, _ := json.Marshal(a)
 	y, _ := json.Marshal(b)
 	return string(x) == string(y)
+}
+
+func TestLocationLink(t *testing.T) {
+	in := `{"targetUri":"file:///ws/a.go",` +
+		`"targetRange":{"start":{"line":2,"character":0},"end":{"line":6,"character":1}},` +
+		`"targetSelectionRange":{"start":{"line":3,"character":4},"end":{"line":3,"character":9}}}`
+	var link lsp.LocationLink
+	if err := json.Unmarshal([]byte(in), &link); err != nil {
+		t.Fatal(err)
+	}
+	want := lsp.Location{URI: "file:///ws/a.go", Range: lsp.Range{Start: lsp.Position{Line: 3, Character: 4}, End: lsp.Position{Line: 3, Character: 9}}}
+	if got := link.Location(); got != want {
+		t.Errorf("Location() = %+v, want %+v (the name, not the whole declaration)", got, want)
+	}
+}
+
+func TestDocumentSymbolDecode(t *testing.T) {
+	r := `{"start":{"line":3,"character":0},"end":{"line":5,"character":1}}`
+	in := `[{"name":"Shape","kind":11,"range":` + r + `,"selectionRange":` + r +
+		`,"children":[{"name":"Area","kind":6,"range":` + r + `,"selectionRange":` + r + `}]}]`
+	var syms []lsp.DocumentSymbol
+	if err := json.Unmarshal([]byte(in), &syms); err != nil {
+		t.Fatal(err)
+	}
+	if len(syms) != 1 || syms[0].Kind != lsp.SymbolKindInterface || len(syms[0].Children) != 1 ||
+		syms[0].Children[0].Name != "Area" || syms[0].Children[0].Kind != lsp.SymbolKindMethod {
+		t.Errorf("decoded = %+v", syms)
+	}
+}
+
+func TestPositionToEditorEdgeCases(t *testing.T) {
+	// Inside a surrogate pair: maps to the character it belongs to.
+	if l, c := lsp.PositionToEditor("a😀b", lsp.Position{Line: 4, Character: 2}); l != 5 || c != 2 {
+		t.Errorf("mid-surrogate = %d:%d, want 5:2", l, c)
+	}
+	// Past the end of the line: clamped to one past the last character.
+	if _, c := lsp.PositionToEditor("abc", lsp.Position{Character: 99}); c != 4 {
+		t.Errorf("past end col = %d, want 4", c)
+	}
+	// Invalid UTF-8 counts as one character of one unit.
+	p, err := lsp.EditorToPosition("a\xffb", 1, 3)
+	if err != nil || p.Character != 2 {
+		t.Errorf("invalid UTF-8 = %+v, %v; want character 2", p, err)
+	}
+}
+
+func TestURIToPathErrors(t *testing.T) {
+	for _, bad := range []string{"file:", "file:///%zz", "%"} {
+		if _, err := lsp.URIToPath(bad); err == nil {
+			t.Errorf("URIToPath(%q) succeeded, want error", bad)
+		}
+	}
 }
