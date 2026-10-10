@@ -207,13 +207,8 @@ and *Type dependencies* lists its `instantiates`/`imports` edges. In JSON, every
 
 Acceptance tests are written before the code they test, behind the `pending` build tag, so
 `make test` stays green. Once the code exists, delete the `//go:build pending` line from the
-files it makes pass, and `make test` (and CI) runs them from then on.
-
-| Area                    | Files                                                                         |
-|-------------------------|-------------------------------------------------------------------------------|
-| CLI                     | `cmd/ego-dir/cli_test.go`                                                     |
-
-`make pending` runs them all.
+files it makes pass, and `make test` (and CI) runs them from then on. `make pending` runs the
+tests still waiting for their code; none are pending at the moment.
 
 Shared fixtures, which run today:
 

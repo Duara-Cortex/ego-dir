@@ -51,7 +51,7 @@ ego-dir find_references    --file main.go --line 10 --col 6
 | `--line`      | (required) | **1-based** line, as shown in editors.                                       |
 | `--col`       | (required) | **1-based** column in characters (runes). Converted to LSP UTF-16 internally. |
 | `--depth`     | `1`        | Hop radius `k` (1–5).                                                        |
-| `--format`    | `md`       | `md` or `json`.                                                              |
+| `--format`    | `md`       | `md` or `json` (all three commands).                                         |
 | `--edges`     | see note   | Comma list of `calls,implements,instantiates,imports,references`, or `all`. Default: all except `references`. |
 | `--direction` | `both`     | `in` (callers/upstream), `out` (callees/downstream) or `both`.               |
 | `--body`      | `ego`      | Include bodies for `ego`, `all` or `none`.                                   |
