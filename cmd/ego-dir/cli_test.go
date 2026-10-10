@@ -1,9 +1,6 @@
-//go:build pending
-
 // Acceptance tests for the CLI. The test binary doubles as the language
 // server: with lspfake.EnvHelper set it serves the sample scenario, so
 // --server can point at os.Args[0].
-// Remove the build constraint above once the code under test exists.
 package main
 
 import (
@@ -262,5 +259,98 @@ func TestRuntimeErrorsExitTwo(t *testing.T) {
 func TestVersionStillWorks(t *testing.T) {
 	if r := cli(t, "version"); r.code != 0 || !strings.HasPrefix(r.stdout, "ego-dir ") {
 		t.Errorf("version = %+v", r)
+	}
+}
+
+func TestHelp(t *testing.T) {
+	for _, arg := range []string{"help", "-h", "--help"} {
+		r := cli(t, arg)
+		if r.code != 0 || !strings.Contains(r.stdout, "inspect_ego") || !strings.Contains(r.stdout, "--depth") {
+			t.Errorf("%s = exit %d, stdout %q", arg, r.code, r.stdout)
+		}
+	}
+}
+
+func TestResolveDefinitionJSON(t *testing.T) {
+	r := cli(t, append([]string{"resolve_definition"}, at(t, "28", "27", "--format", "json")...)...)
+	if r.code != 0 {
+		t.Fatalf("exit %d, stderr: %s", r.code, r.stderr)
+	}
+	var out struct {
+		Schema string `json:"schema"`
+		Symbol struct {
+			ID, Name, Signature string
+		} `json:"symbol"`
+	}
+	if err := json.Unmarshal([]byte(r.stdout), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Schema != "ego-dir/v1" || out.Symbol.ID != "shapes.go:15:6" || out.Symbol.Name != "NewRect" ||
+		out.Symbol.Signature != "func NewRect(w, h float64) Rect" {
+		t.Errorf("resolve_definition JSON = %+v", out)
+	}
+}
+
+func TestFindReferencesJSONFromUseSite(t *testing.T) {
+	// From a use site, the answer is about the declaration it refers to.
+	r := cli(t, append([]string{"find_references"}, at(t, "28", "42", "--format", "json")...)...)
+	if r.code != 0 {
+		t.Fatalf("exit %d, stderr: %s", r.code, r.stderr)
+	}
+	var out struct {
+		Symbol     struct{ ID string } `json:"symbol"`
+		References []struct {
+			ID   string `json:"id"`
+			Text string `json:"text"`
+		} `json:"references"`
+	}
+	if err := json.Unmarshal([]byte(r.stdout), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Symbol.ID != "shapes.go:15:6" || len(out.References) != 2 || out.References[1].ID != "shapes.go:28:42" ||
+		!strings.HasPrefix(out.References[0].Text, "return TotalArea(") {
+		t.Errorf("find_references JSON = %+v", out)
+	}
+}
+
+func TestFindReferencesNone(t *testing.T) {
+	r := cli(t, append([]string{"find_references"}, at(t, "27", "6")...)...)
+	if r.code != 0 || !strings.Contains(r.stdout, "- count: 0") || !strings.Contains(r.stdout, "_none_") {
+		t.Errorf("find_references(Report) = exit %d\n%s%s", r.code, r.stdout, r.stderr)
+	}
+}
+
+func TestMoreUsageErrors(t *testing.T) {
+	root := sampleRoot(t)
+	pos := []string{"--root", root, "--file", "shapes.go", "--line", "18", "--col", "6", "--server", os.Args[0]}
+	cases := map[string][]string{
+		"unknown flag":           append([]string{"inspect_ego", "--colour", "red"}, pos...),
+		"inspect flag elsewhere": append([]string{"resolve_definition", "--depth", "2"}, pos...),
+		"zero timeout":           append([]string{"inspect_ego", "--timeout", "0s"}, pos...),
+		"root is a file":         {"inspect_ego", "--root", filepath.Join(root, "shapes.go"), "--file", "shapes.go", "--line", "1", "--col", "1"},
+		"bad references format":  append([]string{"find_references", "--format", "yaml"}, pos...),
+		"version with arguments": {"version", "now"},
+	}
+	for name, args := range cases {
+		t.Run(name, func(t *testing.T) {
+			if r := cli(t, args...); r.code != 1 || r.stdout != "" {
+				t.Errorf("exit %d, stdout %q, stderr %q; want 1 and no output", r.code, r.stdout, r.stderr)
+			}
+		})
+	}
+}
+
+func TestDefaultRootIsWorkingDirectory(t *testing.T) {
+	t.Chdir(sampleRoot(t))
+	r := cli(t, "resolve_definition", "--file", "shapes.go", "--line", "18", "--col", "6", "--server", os.Args[0])
+	if r.code != 0 || !strings.Contains(r.stdout, "- location: shapes.go:18:6") {
+		t.Errorf("exit %d\n%s%s", r.code, r.stdout, r.stderr)
+	}
+}
+
+func TestTimeoutIsARuntimeError(t *testing.T) {
+	r := cli(t, append([]string{"inspect_ego"}, at(t, "18", "6", "--timeout", "1ns")...)...)
+	if r.code != 2 || r.stdout != "" {
+		t.Errorf("exit %d, stdout %q, stderr %q; want 2 and no output", r.code, r.stdout, r.stderr)
 	}
 }

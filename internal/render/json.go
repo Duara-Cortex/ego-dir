@@ -1,7 +1,6 @@
 package render
 
 import (
-	"encoding/json"
 	"io"
 
 	"github.com/rasJacobCharles/ego-dir/internal/graph"
@@ -76,8 +75,5 @@ func JSON(w io.Writer, g *graph.EgoGraph, root string) error {
 	for _, e := range v.g.Edges {
 		out.Edges = append(out.Edges, jsonEdge{From: v.id(e.From), To: v.id(e.To), Kind: string(e.Kind), Weight: e.Weight})
 	}
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	enc.SetEscapeHTML(false)
-	return enc.Encode(out)
+	return encode(w, out)
 }

@@ -182,3 +182,46 @@ func TestBodiesOnlyWhenPresent(t *testing.T) {
 		t.Errorf("an alter's body should render as an indented code block under its entry:\n%s", buf.String())
 	}
 }
+
+func TestDefinitionMarkdown(t *testing.T) {
+	g := totalArea()
+	var buf bytes.Buffer
+	if err := render.Definition(&buf, g.Nodes[0], root); err != nil {
+		t.Fatal(err)
+	}
+	want := "# Definition: `TotalArea`\n\n- kind: function\n- location: shapes.go:18:6\n- declaration: shapes.go:18-24\n\n" +
+		"## Signature\n\n```go\nfunc TotalArea(shapes []Shape) float64\n```\n\n## Doc\n\nTotalArea sums the area of every shape.\n"
+	if buf.String() != want {
+		t.Errorf("Definition:\n%s\nwant:\n%s", buf.String(), want)
+	}
+}
+
+func TestReferencesOutput(t *testing.T) {
+	target := totalArea().Nodes[0]
+	refs := []render.Reference{
+		{URI: uri, Line: 40, Col: 2, Text: "TotalArea(nil)"},
+		{URI: "file:///workspace/sample/a.go", Line: 9, Col: 3},
+		{URI: uri, Line: 28, Col: 9, Text: "return TotalArea(x)"},
+	}
+	var md bytes.Buffer
+	if err := render.References(&md, target, refs, root); err != nil {
+		t.Fatal(err)
+	}
+	want := "# References: `TotalArea`\n\n- definition: shapes.go:18:6\n- count: 3\n\n## References\n\n" +
+		"- a.go:9:3\n- shapes.go:28:9 `return TotalArea(x)`\n- shapes.go:40:2 `TotalArea(nil)`\n"
+	if md.String() != want {
+		t.Errorf("References:\n%s\nwant:\n%s", md.String(), want)
+	}
+
+	var js bytes.Buffer
+	if err := render.ReferencesJSON(&js, target, nil, root); err != nil {
+		t.Fatal(err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(js.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if list, ok := out["references"].([]any); !ok || len(list) != 0 {
+		t.Errorf("empty references JSON = %s, want an empty list", js.Bytes())
+	}
+}
