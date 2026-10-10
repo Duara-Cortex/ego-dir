@@ -1,12 +1,10 @@
-//go:build pending
-
 // Acceptance tests for the LSP-backed SymbolSource. They run the real
 // lsp.Client and graph.Build against the lspfake sample scenario.
-// Remove the build constraint above once the code under test exists.
 package lspsource_test
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"os"
 	"path/filepath"
@@ -25,12 +23,17 @@ import (
 var defaultKinds = []graph.EdgeKind{graph.EdgeCalls, graph.EdgeImplements, graph.EdgeInstantiates, graph.EdgeImports}
 
 type fixture struct {
-	src  *lspsource.Source
-	root string
-	uri  string
+	closeServer func()
+	src         *lspsource.Source
+	root        string
+	uri         string
 }
 
-func setup(t *testing.T) fixture {
+func setup(t *testing.T) fixture { return setupWith(t, nil) }
+
+// setupWith is setup with a hook to change the fake server's answers. The
+// hook gets the URI of shapes.go.
+func setupWith(t *testing.T, customise func(s *lspfake.Server, uri string)) fixture {
 	t.Helper()
 	root, err := lspfake.SampleRoot()
 	if err != nil {
@@ -38,6 +41,9 @@ func setup(t *testing.T) fixture {
 	}
 	s := lspfake.New()
 	lspfake.Sample(s)
+	if customise != nil {
+		customise(s, lsp.FileURI(filepath.Join(root, lspfake.SampleFile)))
+	}
 	clientEnd, serverEnd := net.Pipe()
 	go s.Serve(context.Background(), serverEnd)
 	t.Cleanup(func() { clientEnd.Close(); serverEnd.Close() })
@@ -48,9 +54,10 @@ func setup(t *testing.T) fixture {
 		t.Fatal(err)
 	}
 	return fixture{
-		src:  lspsource.New(c, root),
-		root: root,
-		uri:  lsp.FileURI(filepath.Join(root, lspfake.SampleFile)),
+		closeServer: func() { serverEnd.Close() },
+		src:         lspsource.New(c, root),
+		root:        root,
+		uri:         lsp.FileURI(filepath.Join(root, lspfake.SampleFile)),
 	}
 }
 
@@ -228,5 +235,104 @@ func TestMissingFile(t *testing.T) {
 	_, err := graph.Build(context.Background(), f.src, missing, 0, 0, graph.Options{Depth: 1, Kinds: defaultKinds})
 	if err == nil {
 		t.Error("Build on a missing file succeeded")
+	}
+}
+
+func TestCallsOfNodesFoundByLocation(t *testing.T) {
+	f := setup(t)
+	// TotalArea is reached through references (no call hierarchy item yet),
+	// so expanding its callers needs a prepareCallHierarchy first.
+	g := f.build(t, 5, 2, graph.Options{Depth: 2, Kinds: []graph.EdgeKind{graph.EdgeCalls, graph.EdgeReferences}, Direction: graph.DirIn})
+	nodes, edges := summary(g)
+	if want := []string{"Area@5 hop0", "TotalArea@18 hop1", "Report@27 hop2"}; !reflect.DeepEqual(nodes, want) {
+		t.Errorf("nodes = %v, want %v", nodes, want)
+	}
+	want := []string{
+		"Report@27 -calls-> TotalArea@18 x1",
+		"Report@27 -references-> TotalArea@18 x1",
+		"TotalArea@18 -calls-> Area@5 x1",
+		"TotalArea@18 -references-> Area@5 x1",
+	}
+	if !reflect.DeepEqual(edges, want) {
+		t.Errorf("edges = %v, want %v", edges, want)
+	}
+}
+
+func TestNoCallsForTypes(t *testing.T) {
+	f := setup(t)
+	g := f.build(t, 4, 6, graph.Options{Depth: 1, Kinds: []graph.EdgeKind{graph.EdgeCalls}})
+	if len(g.Nodes) != 1 || len(g.Edges) != 0 {
+		t.Errorf("Shape has call edges: %+v", g)
+	}
+	if g.Nodes[0].Signature != "type Shape interface" || g.Nodes[0].Qualified != "" {
+		t.Errorf("Shape node = %+v", g.Nodes[0])
+	}
+}
+
+func TestQualifiedNameFromOutlineParent(t *testing.T) {
+	f := setup(t)
+	g := f.build(t, 5, 2, graph.Options{Depth: 1, Kinds: []graph.EdgeKind{graph.EdgeCalls}})
+	if g.Nodes[0].Qualified != "Shape.Area" {
+		t.Errorf("Qualified = %q, want Shape.Area", g.Nodes[0].Qualified)
+	}
+}
+
+func TestServerErrorsMeanNoEdges(t *testing.T) {
+	f := setupWith(t, func(s *lspfake.Server, _ string) {
+		for _, m := range []string{"textDocument/typeDefinition", "textDocument/implementation",
+			"textDocument/references", "callHierarchy/incomingCalls", "callHierarchy/outgoingCalls"} {
+			s.Handle(m, func(context.Context, json.RawMessage) (any, error) {
+				return nil, &lspfake.Error{Code: -32603, Message: "not applicable"}
+			})
+		}
+	})
+	g := f.build(t, 15, 6, graph.Options{Depth: 2, Kinds: []graph.EdgeKind{
+		graph.EdgeCalls, graph.EdgeImplements, graph.EdgeInstantiates, graph.EdgeReferences}})
+	if len(g.Nodes) != 1 || len(g.Edges) != 0 {
+		t.Errorf("graph = %+v, want only the ego", g)
+	}
+}
+
+func TestBrokenSessionIsAnError(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	ego, err := f.src.Resolve(ctx, f.uri, 17, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.closeServer()
+	if _, err := f.src.Neighbors(ctx, ego, graph.DirIn, []graph.EdgeKind{graph.EdgeCalls}); err == nil {
+		t.Error("Neighbors succeeded after the server went away")
+	}
+}
+
+func TestNeighborsOfUnknownNode(t *testing.T) {
+	f := setup(t)
+	_, err := f.src.Neighbors(context.Background(), graph.Node{ID: "file:///x#L1:1"}, graph.DirIn, []graph.EdgeKind{graph.EdgeCalls})
+	if err == nil {
+		t.Error("Neighbors accepted a node the source never returned")
+	}
+}
+
+func TestResolveNothingThere(t *testing.T) {
+	f := setup(t)
+	if _, err := f.src.Resolve(context.Background(), f.uri, 1, 0); err == nil || !strings.Contains(err.Error(), "no symbol") {
+		t.Errorf("Resolve(blank line) = %v, want a no-symbol error", err)
+	}
+}
+
+func TestResolveOutsideOutline(t *testing.T) {
+	// A definition that is not in the outline (a local variable) still
+	// gives a node, named by its source text.
+	f := setupWith(t, func(s *lspfake.Server, uri string) {
+		s.Result("textDocument/definition", map[string]any{"uri": uri, "range": map[string]any{
+			"start": map[string]int{"line": 18, "character": 5}, "end": map[string]int{"line": 18, "character": 10}}})
+	})
+	n, err := f.src.Resolve(context.Background(), f.uri, 18, 6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n.Name != "total" || n.Kind != graph.KindVariable || n.Selection.StartLine != 19 {
+		t.Errorf("node = %+v, want variable total at line 19", n)
 	}
 }

@@ -113,10 +113,10 @@ type EgoGraph struct {
 | Edge kind      | Direction   | LSP source                                                       | Notes                                   |
 |----------------|-------------|------------------------------------------------------------------|-----------------------------------------|
 | `calls`        | caller to callee | `textDocument/prepareCallHierarchy`, then `callHierarchy/incomingCalls` and `callHierarchy/outgoingCalls` | Weight = number of `fromRanges`. |
-| `implements`   | concrete to interface | `textDocument/implementation` on the interface or method   | |
-| `instantiates` | user to type | `textDocument/typeDefinition` on composite literals or constructors found within the ego's range | Best-effort; depends on server support. |
+| `implements`   | concrete to interface | `textDocument/implementation` on the type or method | Orientation from the outline: an interface, or a method inside one, is the target. |
+| `instantiates` | user to type | `textDocument/typeDefinition` on the symbol's name (e.g. a constructor's result type) | Best-effort; depends on server support. |
 | `references`   | referrer to symbol | `textDocument/references` (excluding the declaration), grouped by enclosing symbol | Fallback when call hierarchy is unsupported. |
-| `imports`      | file to package | `textDocument/documentLink` / `textDocument/definition` on import specs  |
+| `imports`      | file to package | Not derived yet. | The builder supports the kind; the LSP-backed source returns no `imports` edges. |
 
 `textDocument/definition` resolves the ego when the cursor is on a use site rather than on
 the declaration. `textDocument/documentSymbol` supplies names, kinds and full ranges for
@@ -211,8 +211,6 @@ files it makes pass, and `make test` (and CI) runs them from then on.
 
 | Area                    | Files                                                                         |
 |-------------------------|-------------------------------------------------------------------------------|
-| Graph builder           | `internal/graph/builder_test.go`                                              |
-| LSP-backed source       | `internal/lspsource/source_test.go`, `internal/lspsource/gopls_integration_test.go` (also `integration`) |
 | Renderers               | `internal/render/render_test.go`                                              |
 | CLI                     | `cmd/ego-dir/cli_test.go`                                                     |
 
