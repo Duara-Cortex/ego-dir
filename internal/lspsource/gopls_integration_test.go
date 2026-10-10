@@ -1,8 +1,7 @@
-//go:build integration && pending
+//go:build integration
 
 // Integration test against a real gopls. Run with `make integration`.
-// It is skipped when gopls is not on PATH. Once the code under test exists,
-// change the constraint above to `//go:build integration`.
+// It is skipped when gopls is not on PATH.
 package lspsource_test
 
 import (

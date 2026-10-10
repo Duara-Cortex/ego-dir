@@ -1,7 +1,4 @@
-//go:build pending
-
 // Acceptance tests for the graph builder.
-// Remove the build constraint above once the code under test exists.
 package graph_test
 
 import (
@@ -379,5 +376,57 @@ func TestErrorsPropagate(t *testing.T) {
 	_, err = graph.Build(ctx, chain(), n.URI, n.Selection.StartLine-1, n.Selection.StartCol-1, graph.Options{Depth: 1, Kinds: allKinds})
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("cancelled context: error = %v, want context.Canceled", err)
+	}
+}
+
+func TestInvalidDirectionAndBody(t *testing.T) {
+	src := chain()
+	n := src.nodes["T"]
+	for _, opts := range []graph.Options{
+		{Depth: 1, Kinds: allKinds, Direction: graph.Direction(9)},
+		{Depth: 1, Kinds: allKinds, Body: graph.BodyMode(9)},
+		{Depth: 1, Kinds: []graph.EdgeKind{"likes"}},
+	} {
+		if _, err := graph.Build(context.Background(), src, n.URI, 9, 5, opts); err == nil {
+			t.Errorf("Build(%+v) succeeded, want error", opts)
+		}
+	}
+}
+
+// idlessSource returns nodes without IDs; Build derives them.
+type idlessSource struct{ *fakeSource }
+
+func (s idlessSource) Resolve(ctx context.Context, uri string, line, char int) (graph.Node, error) {
+	n, err := s.fakeSource.Resolve(ctx, uri, line, char)
+	n.ID = ""
+	return n, err
+}
+
+func (s idlessSource) Neighbors(ctx context.Context, n graph.Node, dir graph.Direction, kinds []graph.EdgeKind) ([]graph.Neighbor, error) {
+	for name, known := range s.nodes {
+		if known.Selection == n.Selection {
+			n = s.nodes[name]
+		}
+	}
+	nbrs, err := s.fakeSource.Neighbors(ctx, n, dir, kinds)
+	for i := range nbrs {
+		nbrs[i].Node.ID = ""
+	}
+	return nbrs, err
+}
+
+func TestBuildDerivesMissingIDs(t *testing.T) {
+	src := chain()
+	n := src.nodes["T"]
+	g, err := graph.Build(context.Background(), idlessSource{src}, n.URI, n.Selection.StartLine-1, n.Selection.StartCol-1,
+		graph.Options{Depth: 1, Kinds: allKinds})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if g.Ego != n.ID || len(g.Nodes) != 3 {
+		t.Errorf("Ego = %q with %d nodes, want %q with 3", g.Ego, len(g.Nodes), n.ID)
 	}
 }
