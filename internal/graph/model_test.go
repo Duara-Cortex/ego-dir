@@ -1,7 +1,4 @@
-//go:build pending
-
 // Acceptance tests for the graph data structures.
-// Remove the build constraint above once the code under test exists.
 package graph_test
 
 import (
@@ -186,5 +183,41 @@ func TestValidate(t *testing.T) {
 		if err := g.Validate(); err == nil {
 			t.Errorf("Validate(%s) = nil, want error", name)
 		}
+	}
+}
+
+func TestAddNodeKeepsFirstNodeData(t *testing.T) {
+	g := &graph.EgoGraph{}
+	first := node(uriA, 3, 6, "Fn", 2)
+	first.Signature = "func Fn()"
+	later := first
+	later.Signature = "changed"
+	later.Hop = 1
+	g.AddNode(first)
+	g.AddNode(later)
+	if g.Nodes[0].Signature != "func Fn()" || g.Nodes[0].Hop != 1 {
+		t.Errorf("node = %+v, want the first node's data with the lower hop", g.Nodes[0])
+	}
+}
+
+func TestSortEdgesWithUnknownNodes(t *testing.T) {
+	// Edges that point outside the graph (invalid, but Sort must still be
+	// deterministic) fall back to ID order.
+	ego := node(uriA, 1, 6, "Ego", 0)
+	g := &graph.EgoGraph{Ego: ego.ID}
+	g.AddNode(ego)
+	g.AddEdge(graph.Edge{From: "z#L1:1", To: ego.ID, Kind: graph.EdgeCalls})
+	g.AddEdge(graph.Edge{From: "a#L1:1", To: ego.ID, Kind: graph.EdgeCalls})
+	g.Sort()
+	if g.Edges[0].From != "a#L1:1" || g.Edges[1].From != "z#L1:1" {
+		t.Errorf("edges = %+v, want ID order", g.Edges)
+	}
+}
+
+func TestValidateDuplicateNodes(t *testing.T) {
+	ego := node(uriA, 1, 6, "Ego", 0)
+	g := &graph.EgoGraph{Ego: ego.ID, Nodes: []graph.Node{ego, ego}}
+	if err := g.Validate(); err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Errorf("Validate = %v, want a duplicate node error", err)
 	}
 }
