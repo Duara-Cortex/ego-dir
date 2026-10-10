@@ -8,10 +8,10 @@ import (
 	"os"
 	"strings"
 
-	"github.com/rasJacobCharles/ego-dir/internal/graph"
-	"github.com/rasJacobCharles/ego-dir/internal/lsp"
-	"github.com/rasJacobCharles/ego-dir/internal/lspsource"
-	"github.com/rasJacobCharles/ego-dir/internal/render"
+	"github.com/Duara-Cortex/ego-dir/internal/graph"
+	"github.com/Duara-Cortex/ego-dir/internal/lsp"
+	"github.com/Duara-Cortex/ego-dir/internal/lspsource"
+	"github.com/Duara-Cortex/ego-dir/internal/render"
 )
 
 // runCommand runs a position command against a freshly started language

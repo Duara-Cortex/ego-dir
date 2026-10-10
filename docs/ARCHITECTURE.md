@@ -41,6 +41,11 @@ the LSP client be tested against an in-process fake server.
 
 ## Request flow for `inspect_ego`
 
+The handshake is sent as `initialise` / `initialised` first. If the server answers that with
+an error (gopls, pyright, rust-analyzer and others do), the client repeats it as
+`initialize` / `initialized`. Any other kind of
+failure (the server exits or the stream breaks) is reported without a retry.
+
 ```mermaid
 sequenceDiagram
     participant CLI

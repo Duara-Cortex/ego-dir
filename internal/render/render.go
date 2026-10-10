@@ -10,8 +10,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/rasJacobCharles/ego-dir/internal/graph"
-	"github.com/rasJacobCharles/ego-dir/internal/lsp"
+	"github.com/Duara-Cortex/ego-dir/internal/graph"
+	"github.com/Duara-Cortex/ego-dir/internal/lsp"
 )
 
 // Node roles relative to the ego.

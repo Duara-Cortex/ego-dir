@@ -7,7 +7,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/rasJacobCharles/ego-dir/internal/lsp"
+	"github.com/Duara-Cortex/ego-dir/internal/lsp"
 )
 
 func TestCallHierarchyItemRoundTripKeepsData(t *testing.T) {

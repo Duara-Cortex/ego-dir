@@ -80,7 +80,7 @@ func SampleRoot() (string, error) {
 // with InvalidParams when it is not sent back unchanged, as gopls requires.
 func Sample(s *Server) {
 	sc := &sampleScenario{}
-	s.Handle("initialise", func(_ context.Context, p json.RawMessage) (any, error) {
+	initialise := func(_ context.Context, p json.RawMessage) (any, error) {
 		if err := sc.load(p); err != nil {
 			return nil, &Error{Code: CodeInvalidParams, Message: err.Error()}
 		}
@@ -95,7 +95,10 @@ func Sample(s *Server) {
 			},
 			"serverInfo": map[string]any{"name": "lspfake"},
 		}, nil
-	})
+	}
+	// Answer both spellings, so the scenario works whichever the client sends.
+	s.Handle("initialise", initialise)
+	s.Handle("initialize", initialise)
 	s.Handle("textDocument/definition", sc.positional(func(sym *symbol, _ json.RawMessage) any {
 		return sc.location(sym.sel)
 	}))
@@ -206,7 +209,7 @@ func Sample(s *Server) {
 		}
 		return top, nil
 	})
-	for _, n := range []string{"textDocument/didOpen", "textDocument/didClose", "initialised"} {
+	for _, n := range []string{"textDocument/didOpen", "textDocument/didClose", "initialised", "initialized"} {
 		s.Handle(n, func(context.Context, json.RawMessage) (any, error) { return nil, nil })
 	}
 }

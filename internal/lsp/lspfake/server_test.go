@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rasJacobCharles/ego-dir/internal/lsp/lspfake"
+	"github.com/Duara-Cortex/ego-dir/internal/lsp/lspfake"
 )
 
 // peer is a bare-bones JSON-RPC client used to drive the fake in tests.
@@ -426,3 +426,19 @@ func withContext(params map[string]any, includeDecl bool) map[string]any {
 }
 
 func itoa(i int) string { b, _ := json.Marshal(i); return string(b) }
+
+func TestSampleAcceptsBothHandshakeSpellings(t *testing.T) {
+	root, err := lspfake.SampleRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootURI := (&url.URL{Scheme: "file", Path: filepath.ToSlash(root)}).String()
+	for _, method := range []string{"initialise", "initialize"} {
+		s := lspfake.New()
+		lspfake.Sample(s)
+		p := start(t, s)
+		if m := p.call(1, method, map[string]any{"rootUri": rootURI}); m.Error != nil || !strings.Contains(string(m.Result), "callHierarchyProvider") {
+			t.Errorf("%s = %+v", method, m)
+		}
+	}
+}

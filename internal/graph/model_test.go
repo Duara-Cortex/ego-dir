@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rasJacobCharles/ego-dir/internal/graph"
+	"github.com/Duara-Cortex/ego-dir/internal/graph"
 )
 
 const uriA = "file:///ws/a.go"

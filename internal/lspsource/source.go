@@ -22,8 +22,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/rasJacobCharles/ego-dir/internal/graph"
-	"github.com/rasJacobCharles/ego-dir/internal/lsp"
+	"github.com/Duara-Cortex/ego-dir/internal/graph"
+	"github.com/Duara-Cortex/ego-dir/internal/lsp"
 )
 
 // Client is the part of *lsp.Client the source uses.

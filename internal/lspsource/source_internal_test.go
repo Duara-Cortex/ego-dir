@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/rasJacobCharles/ego-dir/internal/graph"
-	"github.com/rasJacobCharles/ego-dir/internal/lsp"
+	"github.com/Duara-Cortex/ego-dir/internal/graph"
+	"github.com/Duara-Cortex/ego-dir/internal/lsp"
 )
 
 func TestSplitName(t *testing.T) {

@@ -1,3 +1,3 @@
-module github.com/rasJacobCharles/ego-dir
+module github.com/Duara-Cortex/ego-dir
 
 go 1.26

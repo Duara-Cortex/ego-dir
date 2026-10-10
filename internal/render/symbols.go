@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/rasJacobCharles/ego-dir/internal/graph"
+	"github.com/Duara-Cortex/ego-dir/internal/graph"
 )
 
 // Reference is one use of a symbol, in editor coordinates (1-based line,

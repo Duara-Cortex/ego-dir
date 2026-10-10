@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rasJacobCharles/ego-dir/internal/graph"
-	"github.com/rasJacobCharles/ego-dir/internal/render"
+	"github.com/Duara-Cortex/ego-dir/internal/graph"
+	"github.com/Duara-Cortex/ego-dir/internal/render"
 )
 
 var update = flag.Bool("update", false, "rewrite golden files with the current output")

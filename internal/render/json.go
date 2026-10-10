@@ -3,7 +3,7 @@ package render
 import (
 	"io"
 
-	"github.com/rasJacobCharles/ego-dir/internal/graph"
+	"github.com/Duara-Cortex/ego-dir/internal/graph"
 )
 
 // Schema identifies the JSON output format.

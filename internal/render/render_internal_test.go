@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rasJacobCharles/ego-dir/internal/graph"
+	"github.com/Duara-Cortex/ego-dir/internal/graph"
 )
 
 func TestInlineCode(t *testing.T) {
