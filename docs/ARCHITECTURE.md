@@ -181,7 +181,7 @@ Empty sections are rendered as `_none_` and never omitted, so the layout stays f
 Upstream and downstream alters are listed per hop with signature and doc. Their bodies
 appear only with `--body all`. *Implementations* lists `implements` edges touching the ego,
 and *Type dependencies* lists its `instantiates`/`imports` edges. In JSON, every node has a
-`role` (`ego`, `upstream`, `downstream` or `both`), and ids are `file:line:col` relative to
+`role` (`ego`, `upstream`, `downstream`, `both`, or `related` for a node joined to the graph on neither side of the ego), and ids are `file:line:col` relative to
 `--root`.
 
 ## Exit codes
@@ -211,7 +211,6 @@ files it makes pass, and `make test` (and CI) runs them from then on.
 
 | Area                    | Files                                                                         |
 |-------------------------|-------------------------------------------------------------------------------|
-| Renderers               | `internal/render/render_test.go`                                              |
 | CLI                     | `cmd/ego-dir/cli_test.go`                                                     |
 
 `make pending` runs them all.

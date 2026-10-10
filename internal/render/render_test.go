@@ -1,7 +1,4 @@
-//go:build pending
-
 // Acceptance tests for the renderers.
-// Remove the build constraint above once the code under test exists.
 package render_test
 
 import (
