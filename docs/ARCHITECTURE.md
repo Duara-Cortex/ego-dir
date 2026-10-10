@@ -119,7 +119,25 @@ type EgoGraph struct {
 | `imports`      | file to package | `textDocument/documentLink` / `textDocument/definition` on import specs  |
 
 `textDocument/definition` resolves the ego when the cursor is on a use site rather than on
-the declaration.
+the declaration. `textDocument/documentSymbol` supplies names, kinds and full ranges for
+symbols that are not callable (types, interfaces), the enclosing symbol of a reference, and
+whether a method belongs to an interface (needed to orient `implements` edges).
+A request the server does not support counts as "no edges", not as an error.
+
+## Traversal rules
+
+- **Directions do not mix.** Upstream is a BFS over incoming edges, downstream a BFS over
+  outgoing edges. `--direction both` is the union of the two. Siblings (other callees of a
+  caller) and co-callers are therefore not alters.
+- **`implements` is followed both ways** in both searches, so the concrete implementation of
+  a called interface method is downstream, and callers of an interface method are upstream
+  of its implementations. The edge itself keeps its concrete-to-interface orientation.
+- A node's hop is its shortest distance from the ego. Nodes at hop `k` are not expanded.
+- Each node is expanded at most once per direction (language-server calls are expensive).
+- An edge seen from both of its ends is stored once. Its weight is the larger of the two
+  reported weights, not their sum.
+- Default edge kinds are `calls,implements,instantiates,imports`. `references` is opt-in,
+  because with call hierarchy available it duplicates `calls`.
 
 ## Positions
 
@@ -136,7 +154,12 @@ the declaration.
 4. No timestamps, durations or absolute paths appear in output.
 5. Renderers are covered by golden-file tests (`testdata/*.golden`).
 
-## Markdown output schema
+## Output schemas
+
+The reference outputs are
+[`internal/render/testdata/total_area.golden.md`](../internal/render/testdata/total_area.golden.md)
+and [`total_area.golden.json`](../internal/render/testdata/total_area.golden.json): the ego-graph
+of `TotalArea` in `testdata/sample`, at depth 2. In outline:
 
 ```markdown
 # Ego: `graph.Builder.Build`
@@ -155,6 +178,19 @@ the declaration.
 ```
 
 Empty sections are rendered as `_none_` and never omitted, so the layout stays fixed.
+Upstream and downstream alters are listed per hop with signature and doc. Their bodies
+appear only with `--body all`. *Implementations* lists `implements` edges touching the ego,
+and *Type dependencies* lists its `instantiates`/`imports` edges. In JSON, every node has a
+`role` (`ego`, `upstream`, `downstream` or `both`), and ids are `file:line:col` relative to
+`--root`.
+
+## Exit codes
+
+| Code | When                                                                                |
+|------|-------------------------------------------------------------------------------------|
+| 0    | Success. Results on stdout; stderr is empty.                                        |
+| 1    | Usage error, detected before a server starts: flags, missing file, unknown extension, position outside the file. |
+| 2    | Runtime error: the server cannot start, a request fails, or no symbol is at the position. |
 
 ## Test strategy
 
@@ -165,4 +201,32 @@ Empty sections are rendered as `_none_` and never omitted, so the layout stays f
 | Graph        | Fake `SymbolSource` graph: depth limits, cycles, filters, dedupe, ordering            |
 | Render       | Golden files, plus "render twice and compare bytes"                                    |
 | CLI          | `run(args, stdout, stderr) int` tested in-process: flags, validation, exit codes      |
-| Integration  | `//go:build integration`, real `gopls` on `testdata/`, skipped when gopls is missing  |
+| Integration  | `//go:build integration`, real `gopls` on `testdata/sample`, skipped when gopls is missing |
+
+### Pending acceptance tests
+
+Acceptance tests are written before the code they test, behind the `pending` build tag, so
+`make test` stays green. Once the code exists, delete the `//go:build pending` line from the
+files it makes pass, and `make test` (and CI) runs them from then on.
+
+| Area                    | Files                                                                         |
+|-------------------------|-------------------------------------------------------------------------------|
+| Graph data structures   | `internal/graph/model_test.go`                                                |
+| LSP protocol types      | `internal/lsp/protocol_test.go`                                               |
+| JSON-RPC / LSP client   | `internal/lsp/client_test.go`                                                 |
+| Graph builder           | `internal/graph/builder_test.go`                                              |
+| LSP-backed source       | `internal/lspsource/source_test.go`, `internal/lspsource/gopls_integration_test.go` (also `integration`) |
+| Renderers               | `internal/render/render_test.go`                                              |
+| CLI                     | `cmd/ego-dir/cli_test.go`                                                     |
+
+`make pending` runs them all.
+
+Shared fixtures, which run today:
+
+- `testdata/sample`: a tiny Go module with a known call graph (an interface, an
+  implementation, a constructor and two callers).
+- `internal/lsp/lspfake`: a scripted LSP server with its own framing code, independent of
+  the client. Its `Sample` scenario answers like gopls for `testdata/sample`, computing every
+  position from the file itself. Test binaries re-run themselves as this server (via
+  `EGO_DIR_LSPFAKE=sample`), which tests process spawning and the CLI end to end without
+  gopls.

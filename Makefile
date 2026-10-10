@@ -5,7 +5,7 @@ DIST      := dist
 PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64
 LDFLAGS   := -s -w -X main.version=$(VERSION)
 
-.PHONY: build test package clean
+.PHONY: build test pending integration package clean
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY) $(PKG)
@@ -13,6 +13,16 @@ build:
 test:
 	go vet ./...
 	go test -race ./...
+
+# Acceptance tests written ahead of the code they test. They sit behind the
+# `pending` build tag and are expected to fail until that code exists.
+pending:
+	go vet -tags=pending ./...
+	go test -race -tags=pending ./...
+
+# Tests against real language servers (skipped when they are not installed).
+integration:
+	go test -race -tags=integration,pending ./...
 
 # Cross-compile every platform into dist/<binary>_<version>_<os>_<arch>.tar.gz
 # and write dist/checksums.txt (sha256).
