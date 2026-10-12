@@ -24,8 +24,8 @@ Markdown (or JSON) report of that symbol, the **ego**, and its neighbours, the *
 
 ```sh
 shasum -a 256 -c checksums.txt --ignore-missing     # verify the download
-tar -xzf ego-dir_v0.1.0_darwin_arm64.tar.gz
-install -m 0755 ego-dir_v0.1.0_darwin_arm64/ego-dir ~/.local/bin/   # or any directory on your PATH
+tar -xzf ego-dir_v0.0.1_darwin_arm64.tar.gz
+install -m 0755 ego-dir_v0.0.1_darwin_arm64/ego-dir ~/.local/bin/   # or any directory on your PATH
 ```
 
 **With Go** (1.26 or later):
@@ -39,7 +39,7 @@ go install github.com/Duara-Cortex/ego-dir/cmd/ego-dir@latest
 **From source:**
 
 ```sh
-VERSION=v0.1.0 make install                         # installs into ~/.local/bin (override with INSTALL_DIR=...)
+VERSION=v0.0.1 make install                         # installs into ~/.local/bin (override with INSTALL_DIR=...)
 ```
 
 If `~/.local/bin` is not on your PATH (macOS does not add it by default), add it to your
@@ -117,12 +117,12 @@ go vet ./...
 go test ./...                       # unit tests, offline, using an in-process fake LSP server
 go test -tags integration ./...     # also runs real-server tests (skipped if gopls is missing)
 
-make build                          # build dist/ego-dir for this machine (VERSION=v0.1.0 make build to stamp a version)
+make build                          # build dist/ego-dir for this machine (VERSION=v0.0.1 make build to stamp a version)
 make install                        # install ego-dir into ~/.local/bin (override with INSTALL_DIR=...)
 make test                           # go vet + go test -race (what CI runs)
 make integration                    # tests against real language servers (skipped when not installed)
 make pending                        # acceptance tests for code not written yet (expected to fail)
-VERSION=v0.1.0 make package         # cross-compile to dist/*.tar.gz + dist/checksums.txt
+VERSION=v0.0.1 make package         # cross-compile to dist/*.tar.gz + dist/checksums.txt
 ```
 
 ## Release
