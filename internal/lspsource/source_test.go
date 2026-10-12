@@ -264,8 +264,129 @@ func TestNoCallsForTypes(t *testing.T) {
 	if len(g.Nodes) != 1 || len(g.Edges) != 0 {
 		t.Errorf("Shape has call edges: %+v", g)
 	}
-	if g.Nodes[0].Signature != "type Shape interface" || g.Nodes[0].Qualified != "" {
+	if g.Nodes[0].Signature != "type Shape interface {\n\tArea() float64\n}" || g.Nodes[0].Qualified != "" {
 		t.Errorf("Shape node = %+v", g.Nodes[0])
+	}
+}
+
+func TestTypeNodeCoversDeclaration(t *testing.T) {
+	// gopls starts a type's range at its name; the node starts at "type".
+	f := setup(t)
+	g := f.build(t, 4, 6, graph.Options{Depth: 1, Kinds: defaultKinds, Body: graph.BodyEgo})
+	ego := g.Nodes[0]
+	if want := (graph.Range{StartLine: 4, StartCol: 1, EndLine: 6, EndCol: 2}); ego.Range != want {
+		t.Errorf("Shape range = %+v, want %+v", ego.Range, want)
+	}
+	if want := "type Shape interface {\n\tArea() float64\n}"; ego.Body != want {
+		t.Errorf("Shape body = %q, want %q", ego.Body, want)
+	}
+}
+
+func TestHoverIsCleanedUp(t *testing.T) {
+	f := setup(t)
+	g := f.build(t, 9, 6, graph.Options{Depth: 2, Kinds: defaultKinds}) // Rect
+	docs := map[string]string{}
+	for _, n := range g.Nodes {
+		docs[n.Name+"@"+itoa(n.Selection.StartLine)] = n.Doc
+		for _, s := range []string{n.Signature, n.Doc} {
+			for _, junk := range []string{"---", "size=", "pkg.go.dev", "```"} {
+				if strings.Contains(s, junk) {
+					t.Errorf("%s: %q contains %q", n.Name, s, junk)
+				}
+			}
+		}
+	}
+	want := map[string]string{"Rect@9": "Rect is an axis-aligned rectangle.", "Shape@4": "Shape is anything with an area."}
+	for k, v := range want {
+		if docs[k] != v {
+			t.Errorf("doc of %s = %q, want %q", k, docs[k], v)
+		}
+	}
+}
+
+func TestNeighboursOutsideTheRootAreDropped(t *testing.T) {
+	// gopls points into $GOROOT (float64, fmt.Errorf, ...). Those files are
+	// outside the workspace; they are neither read nor reported.
+	outside := map[string]any{"uri": lspfake.SampleBuiltinURI, "range": map[string]any{
+		"start": map[string]int{"line": 59, "character": 5}, "end": map[string]int{"line": 59, "character": 12}}}
+	f := setupWith(t, func(s *lspfake.Server, _ string) {
+		s.Result("callHierarchy/outgoingCalls", []any{map[string]any{
+			"to": map[string]any{"name": "Errorf", "kind": lspfake.KindFunction, "uri": lspfake.SampleBuiltinURI,
+				"range": outside["range"], "selectionRange": outside["range"]},
+			"fromRanges": []any{outside["range"]},
+		}})
+		s.Result("textDocument/references", []any{outside})
+	})
+	all := []graph.EdgeKind{graph.EdgeCalls, graph.EdgeImplements, graph.EdgeInstantiates, graph.EdgeReferences}
+	g := f.build(t, 18, 6, graph.Options{Depth: 2, Kinds: all})
+	nodes, edges := summary(g)
+	if want := []string{"TotalArea@18 hop0", "Report@27 hop1"}; !reflect.DeepEqual(nodes, want) {
+		t.Errorf("nodes = %v, want %v", nodes, want)
+	}
+	if want := []string{"Report@27 -calls-> TotalArea@18 x1"}; !reflect.DeepEqual(edges, want) {
+		t.Errorf("edges = %v, want %v", edges, want)
+	}
+}
+
+func TestOutOfRootTypeDefinitionIsNotAnInstantiation(t *testing.T) {
+	// TotalArea returns float64, which gopls places in $GOROOT.
+	f := setup(t)
+	g := f.build(t, 18, 6, graph.Options{Depth: 1, Kinds: []graph.EdgeKind{graph.EdgeInstantiates}})
+	if len(g.Nodes) != 1 || len(g.Edges) != 0 {
+		nodes, edges := summary(g)
+		t.Errorf("graph = %v %v, want only the ego", nodes, edges)
+	}
+}
+
+func TestMethodNodesComeFromTheOutline(t *testing.T) {
+	// gopls gives call hierarchy items kind Function and the name as their
+	// range; kind, range and qualified name come from the outline instead.
+	f := setup(t)
+	g := f.build(t, 18, 6, graph.Options{Depth: 2, Kinds: defaultKinds})
+	byLine := map[int]graph.Node{}
+	for _, n := range g.Nodes {
+		byLine[n.Selection.StartLine] = n
+	}
+	tests := []struct {
+		line      int
+		kind      graph.SymbolKind
+		qualified string
+		rng       graph.Range
+	}{
+		{5, graph.KindMethod, "Shape.Area", graph.Range{StartLine: 5, StartCol: 2, EndLine: 5, EndCol: 16}},
+		{12, graph.KindMethod, "Rect.Area", graph.Range{StartLine: 12, StartCol: 1, EndLine: 12, EndCol: 50}},
+		{27, graph.KindFunction, "", graph.Range{StartLine: 27, StartCol: 1, EndLine: 29, EndCol: 2}},
+	}
+	for _, tc := range tests {
+		n, ok := byLine[tc.line]
+		if !ok {
+			t.Errorf("no node at line %d", tc.line)
+			continue
+		}
+		if n.Kind != tc.kind || n.Qualified != tc.qualified || n.Range != tc.rng {
+			t.Errorf("line %d: kind %s, qualified %q, range %+v; want %s, %q, %+v",
+				tc.line, n.Kind, n.Qualified, n.Range, tc.kind, tc.qualified, tc.rng)
+		}
+	}
+}
+
+func TestCallerThroughDynamicDispatch(t *testing.T) {
+	// gopls lists TotalArea as a caller of Rect.Area, as it calls Shape.Area.
+	f := setup(t)
+	g := f.build(t, 12, 15, graph.Options{Depth: 1, Kinds: []graph.EdgeKind{graph.EdgeCalls}, Direction: graph.DirIn})
+	_, edges := summary(g)
+	if want := []string{"TotalArea@18 -calls-> Area@12 x1"}; !reflect.DeepEqual(edges, want) {
+		t.Errorf("edges = %v, want %v", edges, want)
+	}
+}
+
+func TestReferencesOfAType(t *testing.T) {
+	f := setup(t)
+	g := f.build(t, 9, 6, graph.Options{Depth: 1, Kinds: []graph.EdgeKind{graph.EdgeReferences}})
+	_, edges := summary(g)
+	want := []string{"Area@12 -references-> Rect@9 x1", "NewRect@15 -references-> Rect@9 x2"}
+	if !reflect.DeepEqual(edges, want) {
+		t.Errorf("edges = %v, want %v", edges, want)
 	}
 }
 

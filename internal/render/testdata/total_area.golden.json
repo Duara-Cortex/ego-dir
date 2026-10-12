@@ -18,12 +18,13 @@
     {
       "id": "shapes.go:5:2",
       "name": "Area",
+      "qualified": "Shape.Area",
       "kind": "method",
       "file": "shapes.go",
-      "range": {"start_line": 5, "start_col": 1, "end_line": 5, "end_col": 16},
+      "range": {"start_line": 5, "start_col": 2, "end_line": 5, "end_col": 16},
       "hop": 1,
       "role": "downstream",
-      "signature": "Area() float64"
+      "signature": "func (Shape) Area() float64"
     },
     {
       "id": "shapes.go:27:6",
@@ -39,6 +40,7 @@
     {
       "id": "shapes.go:12:15",
       "name": "Area",
+      "qualified": "Rect.Area",
       "kind": "method",
       "file": "shapes.go",
       "range": {"start_line": 12, "start_col": 1, "end_line": 12, "end_col": 50},

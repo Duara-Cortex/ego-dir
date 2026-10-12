@@ -197,7 +197,8 @@ func TestTextDocumentRequests(t *testing.T) {
 	}
 
 	hover, err := sess.client.Hover(ctx, sess.uri, pos(17, 5))
-	want := "```go\nfunc TotalArea(shapes []Shape) float64\n```\n\nTotalArea sums the area of every shape."
+	want := "```go\nfunc TotalArea(shapes []Shape) float64\n```\n\n---\n\nTotalArea sums the area of every shape.\n\n\n---\n\n" +
+		"[`sample.TotalArea` on pkg.go.dev](https://pkg.go.dev/example.com/sample#TotalArea)"
 	if err != nil || hover != want {
 		t.Errorf("Hover = %q, %v\nwant %q", hover, err, want)
 	}
@@ -288,9 +289,11 @@ func TestCallHierarchy(t *testing.T) {
 		t.Errorf("OutgoingCalls = %+v, %v", out, err)
 	}
 
-	none, err := sess.client.PrepareCallHierarchy(ctx, sess.uri, pos(8, 5)) // a type, not callable
-	if err != nil || len(none) != 0 {
-		t.Errorf("PrepareCallHierarchy(type) = %+v, %v; want empty", none, err)
+	// A type is not callable; like gopls, the fake answers with an error.
+	none, err := sess.client.PrepareCallHierarchy(ctx, sess.uri, pos(8, 5))
+	var rpcErr *lsp.RPCError
+	if !errors.As(err, &rpcErr) || len(none) != 0 {
+		t.Errorf("PrepareCallHierarchy(type) = %+v, %v; want an RPC error", none, err)
 	}
 }
 

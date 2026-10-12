@@ -79,19 +79,19 @@ ego-dir resolve_definition --file main.go --line 10 --col 6
 ego-dir find_references    --file main.go --line 10 --col 6
 ```
 
-| Flag          | Default    | Meaning                                                                      |
-|---------------|------------|------------------------------------------------------------------------------|
-| `--file`      | (required) | Path to the source file. Relative paths resolve against `--root`.            |
-| `--line`      | (required) | **1-based** line, as shown in editors.                                       |
-| `--col`       | (required) | **1-based** column in characters (runes). Converted to LSP UTF-16 internally. |
-| `--depth`     | `1`        | Hop radius `k` (1–5).                                                        |
-| `--format`    | `md`       | `md` or `json` (all three commands).                                         |
-| `--edges`     | see note   | Comma list of `calls,implements,instantiates,imports,references`, or `all`. Default: all except `references`. |
-| `--direction` | `both`     | `in` (callers/upstream), `out` (callees/downstream) or `both`.               |
-| `--body`      | `ego`      | Include bodies for `ego`, `all` or `none`.                                   |
-| `--root`      | cwd        | Workspace root passed to the language server.                                |
-| `--server`    | by ext     | Override the language server command.                                        |
-| `--timeout`   | `30s`      | Overall deadline.                                                            |
+| Flag          | Default    | Meaning                                                                                                                             |
+|---------------|------------|-------------------------------------------------------------------------------------------------------------------------------------|
+| `--file`      | (required) | Path to the source file. Relative paths resolve against `--root`.                                                                   |
+| `--line`      | (required) | **1-based** line, as shown in editors.                                                                                              |
+| `--col`       | (required) | **1-based** column in characters (runes). Converted to LSP UTF-16 internally.                                                       |
+| `--depth`     | `1`        | Hop radius `k` (1–5).                                                                                                               |
+| `--format`    | `md`       | `md` or `json` (all three commands).                                                                                                |
+| `--edges`     | see note   | Comma list of `calls,implements,instantiates,imports,references`, or `all`. Default: all except `references`.                       |
+| `--direction` | `both`     | `in` (callers/upstream), `out` (callees/downstream) or `both`.                                                                      |
+| `--body`      | `ego`      | Include bodies for `ego`, `all` or `none`.                                                                                          |
+| `--root`      | cwd        | Workspace root passed to the language server. Alters outside it (standard library, module cache, sibling directories) are left out. |
+| `--server`    | by ext     | Override the language server command.                                                                                               |
+| `--timeout`   | `30s`      | Overall deadline.                                                                                                                   |
 
 Results go to stdout. Diagnostics go to stderr. The exit code is `0` on success, `1` on a
 usage error (bad flags, missing file, position outside the file) and `2` on an LSP or runtime

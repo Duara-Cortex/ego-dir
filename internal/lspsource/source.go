@@ -11,6 +11,8 @@
 //
 // An error the server returns for a neighbour request (it does not support
 // it, or it does not apply to the symbol) counts as no neighbours.
+// Neighbours declared outside the workspace root (the standard library, the
+// module cache) are dropped: their paths depend on the machine.
 package lspsource
 
 import (
@@ -18,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -43,8 +46,9 @@ type Client interface {
 // Source is a graph.SymbolSource backed by a language server. It caches
 // files, outlines and nodes; it is safe for concurrent use.
 type Source struct {
-	c    Client
-	root string
+	c     Client
+	root  string
+	roots []string // root, and root with symlinks resolved; empty: no limit
 
 	mu    sync.Mutex
 	files map[string]*file       // by URI
@@ -55,7 +59,34 @@ var _ graph.SymbolSource = (*Source)(nil)
 
 // New returns a source that asks c about the workspace at root.
 func New(c Client, root string) *Source {
-	return &Source{c: c, root: root, files: map[string]*file{}, nodes: map[graph.NodeID]*info{}}
+	s := &Source{c: c, root: root, files: map[string]*file{}, nodes: map[graph.NodeID]*info{}}
+	if root != "" {
+		if abs, err := filepath.Abs(root); err == nil {
+			s.roots = append(s.roots, abs)
+			if real, err := filepath.EvalSymlinks(abs); err == nil && real != abs {
+				s.roots = append(s.roots, real)
+			}
+		}
+	}
+	return s
+}
+
+// inWorkspace reports whether uri is a file under the workspace root.
+func (s *Source) inWorkspace(uri string) bool {
+	if len(s.roots) == 0 {
+		return true
+	}
+	path, err := lsp.URIToPath(uri)
+	if err != nil {
+		return false
+	}
+	for _, root := range s.roots {
+		rel, err := filepath.Rel(root, path)
+		if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
 }
 
 // file is a document read from disk and its outline.
@@ -153,6 +184,9 @@ func (s *Source) calls(ctx context.Context, inf *info, dir graph.Direction) ([]g
 			return nil, err
 		}
 		for _, c := range calls {
+			if !s.inWorkspace(c.From.URI) {
+				continue
+			}
 			nb, err := s.fromItem(ctx, c.From)
 			if err != nil {
 				return nil, err
@@ -166,6 +200,9 @@ func (s *Source) calls(ctx context.Context, inf *info, dir graph.Direction) ([]g
 		return nil, err
 	}
 	for _, c := range calls {
+		if !s.inWorkspace(c.To.URI) {
+			continue
+		}
 		nb, err := s.fromItem(ctx, c.To)
 		if err != nil {
 			return nil, err
@@ -220,6 +257,9 @@ func (s *Source) located(ctx context.Context, inf *info, kind graph.EdgeKind,
 	}
 	var out []graph.Neighbor
 	for _, loc := range locs {
+		if !s.inWorkspace(loc.URI) {
+			continue
+		}
 		nb, err := s.fromLocation(ctx, loc)
 		if err != nil {
 			return nil, err
@@ -240,6 +280,9 @@ func (s *Source) references(ctx context.Context, inf *info) ([]graph.Neighbor, e
 	var order []graph.NodeID
 	byID := map[graph.NodeID]*graph.Neighbor{}
 	for _, loc := range locs {
+		if !s.inWorkspace(loc.URI) {
+			continue
+		}
 		f, err := s.load(ctx, loc.URI)
 		if err != nil {
 			return nil, err
@@ -388,6 +431,7 @@ func (f *file) flatten(syms []lsp.DocumentSymbol, parent *lsp.DocumentSymbol) {
 	for _, sym := range syms {
 		entry := symbol{DocumentSymbol: sym}
 		entry.Children = nil
+		entry.Range.Start = f.withKeyword(entry.Range.Start)
 		if parent != nil {
 			entry.parentKind = parent.Kind
 			entry.parentName, _ = splitName(parent.Name)
@@ -419,6 +463,24 @@ func (f *file) innermost(pos lsp.Position, span func(symbol) lsp.Range) *symbol 
 		}
 	}
 	return best
+}
+
+// withKeyword moves the start of a declaration back over a "type" keyword
+// that is alone before it on its line: gopls starts a type's range at its
+// name, so the body would otherwise read "Shape interface {...}".
+func (f *file) withKeyword(start lsp.Position) lsp.Position {
+	line := f.line(start.Line)
+	_, col := lsp.PositionToEditor(line, start)
+	runes := []rune(line)
+	if col-1 > len(runes) {
+		return start
+	}
+	before := string(runes[:col-1])
+	if strings.TrimSpace(before) != "type" {
+		return start
+	}
+	// Only ASCII precedes the name, so runes and UTF-16 units agree.
+	return lsp.Position{Line: start.Line, Character: strings.Index(before, "type")}
 }
 
 func contains(r lsp.Range, p lsp.Position) bool {
@@ -485,24 +547,33 @@ func splitName(name string) (short, qualified string) {
 	return name, ""
 }
 
-var linkOnly = regexp.MustCompile("^\\[[^\\]]*\\]\\([^)]*\\)$")
+var (
+	linkOnly = regexp.MustCompile("^\\[[^\\]]*\\]\\([^)]*\\)$")
+	// laterCode is a fenced code block after the signature: gopls lists a
+	// type's method set there.
+	laterCode = regexp.MustCompile("(?s)```.*?```")
+	// layout is the memory layout gopls appends to a type or field, e.g.
+	// " // size=200 (0xc8), class=208 (0xd0)" or "..., offset=16 (0x10)".
+	layout = regexp.MustCompile(`(?m)[ \t]*// (?:(?:size|class|offset)=\d+ \(0x[0-9a-f]+\)(?:, |$))+$`)
+)
 
 // parseHover splits hover Markdown into the first code block (the
-// signature) and the remaining prose (the doc). Paragraphs that are only a
-// link (gopls adds one to pkg.go.dev) are dropped.
+// signature) and the remaining prose (the doc). It drops what gopls adds
+// around them: the memory layout comments in the signature, horizontal
+// rules, the method set code block, and the link to pkg.go.dev.
 func parseHover(md string) (signature, doc string) {
 	md = strings.TrimSpace(md)
 	if strings.HasPrefix(md, "```") {
 		body := md[strings.IndexByte(md+"\n", '\n')+1:]
 		if end := strings.Index(body, "```"); end >= 0 {
-			signature = strings.TrimSpace(body[:end])
-			md = body[end+3:]
+			signature = strings.TrimSpace(layout.ReplaceAllString(body[:end], ""))
+			md = laterCode.ReplaceAllString(body[end+3:], "")
 		}
 	}
 	var paras []string
 	for _, p := range strings.Split(strings.TrimSpace(md), "\n\n") {
 		p = strings.TrimSpace(p)
-		if p != "" && !linkOnly.MatchString(p) {
+		if p != "" && p != "---" && !linkOnly.MatchString(p) {
 			paras = append(paras, p)
 		}
 	}

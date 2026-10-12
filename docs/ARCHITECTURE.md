@@ -127,7 +127,20 @@ type EgoGraph struct {
 the declaration. `textDocument/documentSymbol` supplies names, kinds and full ranges for
 symbols that are not callable (types, interfaces), the enclosing symbol of a reference, and
 whether a method belongs to an interface (needed to orient `implements` edges).
+Node kinds, ranges and qualified names come from the outline, not from call hierarchy
+items (gopls gives every item kind `function` and only the name as its range). A type's
+range is widened to take in the `type` keyword, which gopls leaves out.
 A request the server does not support counts as "no edges", not as an error.
+
+Neighbours declared outside `--root` (the standard library, the module cache) are dropped,
+along with their edges. For example, gopls answers `typeDefinition` on a function with its
+result type, which for `float64` or `error` is in `$GOROOT`. Those paths depend on the
+machine, and the files are not part of the workspace. The ego itself can still be outside
+the root.
+
+`textDocument/hover` supplies the signature (its first code block) and the doc (the prose
+after it). gopls decorations are removed: memory-layout comments (`// size=…, class=…,
+offset=…`), horizontal rules, the method-set code block and the pkg.go.dev link.
 
 ## Traversal rules
 
