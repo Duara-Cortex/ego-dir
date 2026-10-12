@@ -286,7 +286,7 @@ func TestResolveDefinitionJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 	if out.Schema != "ego-dir/v1" || out.Symbol.ID != "shapes.go:15:6" || out.Symbol.Name != "NewRect" ||
-		out.Symbol.Signature != "func NewRect(w, h float64) Rect" {
+		out.Symbol.Signature != "func NewRect(w float64, h float64) Rect" { // as gopls hovers it
 		t.Errorf("resolve_definition JSON = %+v", out)
 	}
 }

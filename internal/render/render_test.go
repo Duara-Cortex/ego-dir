@@ -38,10 +38,12 @@ func totalArea() *graph.EgoGraph {
 		"\t\ttotal += s.Area()\n\t}\n\treturn total\n}"
 	report := mk("Report", graph.KindFunction, sel(27, 6, 6), graph.Range{StartLine: 27, StartCol: 1, EndLine: 29, EndCol: 2}, 1,
 		"func Report() float64", "Report returns the total area of two rectangles.")
-	shapeArea := mk("Area", graph.KindMethod, sel(5, 2, 4), graph.Range{StartLine: 5, StartCol: 1, EndLine: 5, EndCol: 16}, 1,
-		"Area() float64", "")
+	shapeArea := mk("Area", graph.KindMethod, sel(5, 2, 4), graph.Range{StartLine: 5, StartCol: 2, EndLine: 5, EndCol: 16}, 1,
+		"func (Shape) Area() float64", "")
+	shapeArea.Qualified = "Shape.Area"
 	rectArea := mk("Area", graph.KindMethod, sel(12, 15, 4), graph.Range{StartLine: 12, StartCol: 1, EndLine: 12, EndCol: 50}, 2,
 		"func (r Rect) Area() float64", "Area returns the rectangle's area.")
+	rectArea.Qualified = "Rect.Area"
 
 	g := &graph.EgoGraph{Ego: ego.ID, Depth: 2}
 	for _, n := range []graph.Node{ego, report, shapeArea, rectArea} {

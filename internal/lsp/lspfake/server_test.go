@@ -306,11 +306,24 @@ func TestSampleCallHierarchy(t *testing.T) {
 	if got := string(ego.SelectionRange); got != `{"start":{"line":17,"character":5},"end":{"line":17,"character":14}}` {
 		t.Errorf("selectionRange = %s", got)
 	}
-	if got := string(ego.Range); got != `{"start":{"line":17,"character":0},"end":{"line":23,"character":1}}` {
-		t.Errorf("range = %s", got)
+	// gopls answers with the name as the item's range, and kind Function
+	// for methods too; the client must take both from the outline.
+	if got := string(ego.Range); got != string(ego.SelectionRange) {
+		t.Errorf("range = %s, want the selection range", got)
+	}
+	m = p.call(7, "textDocument/prepareCallHierarchy", at(uri, 11, 15))
+	var rectArea []item // not items: decoding into it would overwrite ego's raw fields
+	if err := json.Unmarshal(m.Result, &rectArea); err != nil || len(rectArea) != 1 || rectArea[0].Kind != lspfake.KindFunction {
+		t.Fatalf("prepare on Rect.Area = %s, want one item of kind Function", m.Result)
+	}
+	// Dynamic dispatch: TotalArea calls Rect.Area through Shape, so gopls
+	// lists it as a caller of Rect.Area but not as a callee of TotalArea.
+	in := p.call(8, "callHierarchy/incomingCalls", map[string]any{"item": rectArea[0]})
+	if !strings.Contains(string(in.Result), `"name":"TotalArea"`) {
+		t.Errorf("incomingCalls of Rect.Area = %s, want TotalArea", in.Result)
 	}
 
-	in := p.call(2, "callHierarchy/incomingCalls", map[string]any{"item": ego})
+	in = p.call(2, "callHierarchy/incomingCalls", map[string]any{"item": ego})
 	want := `[{"from":` // Report calls TotalArea once, at line 28 col 9 (1-based).
 	if !strings.HasPrefix(string(in.Result), want) ||
 		!strings.Contains(string(in.Result), `"name":"Report"`) ||
@@ -321,6 +334,9 @@ func TestSampleCallHierarchy(t *testing.T) {
 	out := p.call(3, "callHierarchy/outgoingCalls", map[string]any{"item": ego})
 	if !strings.Contains(string(out.Result), `"name":"Area"`) || !strings.Contains(string(out.Result), `"line":20`) {
 		t.Errorf("outgoingCalls = %s", out.Result)
+	}
+	if strings.Count(string(out.Result), `"to":`) != 1 {
+		t.Errorf("outgoingCalls = %s, want only Shape.Area", out.Result)
 	}
 
 	// Report calls NewRect twice: weight 2.
@@ -355,26 +371,42 @@ func TestSampleTextDocumentRequests(t *testing.T) {
 		return `{"uri":"` + uri + `","range":{"start":{"line":` + itoa(line) + `,"character":` + itoa(from) +
 			`},"end":{"line":` + itoa(line) + `,"character":` + itoa(to) + `}}}`
 	}
+	builtin := `{"uri":"` + lspfake.SampleBuiltinURI + `","range":{"start":{"line":59,"character":5},"end":{"line":59,"character":12}}}`
 	tests := []struct {
 		name   string
 		method string
 		params map[string]any
-		want   string
+		want   string // the result, or "error" for an error response
 	}{
 		{"definition from call site", "textDocument/definition", at(uri, 27, 10), loc(17, 5, 14)},
+		{"definition from a type use", "textDocument/definition", at(uri, 17, 26), loc(3, 5, 10)},
 		{"definition on blank", "textDocument/definition", at(uri, 1, 0), "null"},
-		{"typeDefinition of NewRect", "textDocument/typeDefinition", at(uri, 14, 6), loc(8, 5, 9)},
+		{"typeDefinition of NewRect", "textDocument/typeDefinition", at(uri, 14, 6), "[" + loc(8, 5, 9) + "]"},
+		{"typeDefinition of a type", "textDocument/typeDefinition", at(uri, 3, 6), "[" + loc(3, 5, 10) + "]"},
+		{"typeDefinition of TotalArea", "textDocument/typeDefinition", at(uri, 17, 6), "[" + builtin + "]"},
+		{"typeDefinition of Shape.Area", "textDocument/typeDefinition", at(uri, 4, 2), "[" + builtin + "]"},
 		{"implementation of Shape", "textDocument/implementation", at(uri, 3, 6), "[" + loc(8, 5, 9) + "]"},
 		{"implementation of Rect.Area", "textDocument/implementation", at(uri, 11, 15), "[" + loc(4, 1, 5) + "]"},
+		{"implementation of a function", "textDocument/implementation", at(uri, 17, 6), "error"},
 		{"references without decl", "textDocument/references",
 			withContext(at(uri, 17, 5), false), "[" + loc(27, 8, 17) + "]"},
 		{"references with decl", "textDocument/references",
 			withContext(at(uri, 17, 5), true), "[" + loc(17, 5, 14) + "," + loc(27, 8, 17) + "]"},
-		{"prepare on a type", "textDocument/prepareCallHierarchy", at(uri, 8, 5), "null"},
+		{"references through dynamic dispatch", "textDocument/references",
+			withContext(at(uri, 11, 15), false), "[" + loc(20, 13, 17) + "]"},
+		{"references of a type", "textDocument/references",
+			withContext(at(uri, 8, 5), false), "[" + loc(11, 8, 12) + "," + loc(14, 27, 31) + "," + loc(14, 41, 45) + "]"},
+		{"prepare on a type", "textDocument/prepareCallHierarchy", at(uri, 8, 5), "error"},
 	}
 	for i, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			m := p.call(10+i, tc.method, tc.params)
+			if tc.want == "error" {
+				if m.Error == nil {
+					t.Errorf("%s = %s, want an error response", tc.method, m.Result)
+				}
+				return
+			}
 			if m.Error != nil || string(m.Result) != tc.want {
 				t.Errorf("%s = %s (err %v)\nwant %s", tc.method, m.Result, m.Error, tc.want)
 			}
@@ -383,10 +415,12 @@ func TestSampleTextDocumentRequests(t *testing.T) {
 
 	ds := p.call(98, "textDocument/documentSymbol", map[string]any{"textDocument": map[string]any{"uri": uri}})
 	var syms []struct {
-		Name     string `json:"name"`
-		Kind     int    `json:"kind"`
+		Name     string          `json:"name"`
+		Kind     int             `json:"kind"`
+		Range    json.RawMessage `json:"range"`
 		Children []struct {
-			Name string `json:"name"`
+			Name  string          `json:"name"`
+			Range json.RawMessage `json:"range"`
 		} `json:"children"`
 	}
 	if err := json.Unmarshal(ds.Result, &syms); err != nil {
@@ -396,17 +430,46 @@ func TestSampleTextDocumentRequests(t *testing.T) {
 	for _, s := range syms {
 		names = append(names, s.Name)
 	}
-	if want := []string{"Shape", "Rect", "Area", "NewRect", "TotalArea", "Report"}; !reflect.DeepEqual(names, want) {
+	if want := []string{"Shape", "Rect", "(Rect).Area", "NewRect", "TotalArea", "Report"}; !reflect.DeepEqual(names, want) {
 		t.Errorf("documentSymbol names = %v, want %v", names, want)
 	}
 	if syms[0].Kind != lspfake.KindInterface || len(syms[0].Children) != 1 || syms[0].Children[0].Name != "Area" {
 		t.Errorf("Shape symbol = %+v, want interface with child Area", syms[0])
 	}
+	// As with gopls, a type's range starts at its name, not at "type", and
+	// so does an interface method's.
+	if got, want := string(syms[0].Range), `{"start":{"line":3,"character":5},"end":{"line":5,"character":1}}`; got != want {
+		t.Errorf("Shape range = %s, want %s", got, want)
+	}
+	if got, want := string(syms[0].Children[0].Range), `{"start":{"line":4,"character":1},"end":{"line":4,"character":15}}`; got != want {
+		t.Errorf("Shape.Area range = %s, want %s", got, want)
+	}
 
-	m := p.call(99, "textDocument/hover", at(uri, 17, 5))
-	want := "```go\\nfunc TotalArea(shapes []Shape) float64\\n```\\n\\nTotalArea sums the area of every shape."
-	if !strings.Contains(string(m.Result), want) {
-		t.Errorf("hover = %s", m.Result)
+	hovers := []struct {
+		line, char int
+		want       string
+	}{
+		{17, 5, "```go\nfunc TotalArea(shapes []Shape) float64\n```\n\n---\n\nTotalArea sums the area of every shape.\n\n\n---\n\n" +
+			"[`sample.TotalArea` on pkg.go.dev](https://pkg.go.dev/example.com/sample#TotalArea)"},
+		{4, 1, "```go\nfunc (Shape) Area() float64\n```\n\n---\n\n" +
+			"[`(sample.Shape).Area` on pkg.go.dev](https://pkg.go.dev/example.com/sample#Shape.Area)"},
+		{3, 5, "```go\ntype Shape interface { // size=16 (0x10)\n\tArea() float64\n}\n```\n\n---\n\nShape is anything with an area.\n\n\n---\n\n" +
+			"[`sample.Shape` on pkg.go.dev](https://pkg.go.dev/example.com/sample#Shape)"},
+		{8, 5, "```go\ntype Rect struct{ W, H float64 } // size=16 (0x10)\n```\n\n---\n\nRect is an axis-aligned rectangle.\n\n\n" +
+			"```go\nfunc (r Rect) Area() float64\n```\n\n---\n\n[`sample.Rect` on pkg.go.dev](https://pkg.go.dev/example.com/sample#Rect)"},
+		{14, 5, "```go\nfunc NewRect(w float64, h float64) Rect\n```\n\n---\n\nNewRect builds a Rect.\n\n\n---\n\n" +
+			"[`sample.NewRect` on pkg.go.dev](https://pkg.go.dev/example.com/sample#NewRect)"},
+	}
+	for i, h := range hovers {
+		m := p.call(100+i, "textDocument/hover", at(uri, h.line, h.char))
+		var result struct {
+			Contents struct {
+				Value string `json:"value"`
+			} `json:"contents"`
+		}
+		if err := json.Unmarshal(m.Result, &result); err != nil || result.Contents.Value != h.want {
+			t.Errorf("hover at %d:%d = %q\nwant %q", h.line, h.char, result.Contents.Value, h.want)
+		}
 	}
 }
 

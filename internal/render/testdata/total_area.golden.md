@@ -39,7 +39,7 @@ func TotalArea(shapes []Shape) float64 {
 ### Hop 1
 
 - `Area` (method) shapes.go:5
-  - signature: `Area() float64`
+  - signature: `func (Shape) Area() float64`
 
 ### Hop 2
 
