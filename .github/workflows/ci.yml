@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+# Cancel a superseded run on the same branch or pull request.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Run Tests
+        run: make test
+
+  integration:
+    name: Integration Tests (gopls)
+    runs-on: ubuntu-latest
+    env:
+      # The golden files and lspfake follow this gopls's output. Bump it on purpose.
+      GOPLS_VERSION: v0.23.0
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Install gopls
+        run: |
+          go install "golang.org/x/tools/gopls@${GOPLS_VERSION}"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      # Fails the job here if gopls is missing, rather than letting the tests skip.
+      - name: Check gopls
+        run: gopls version
+
+      # An explicit `shell: bash` runs with pipefail, so a test failure is not hidden by tee.
+      - name: Run Integration Tests
+        shell: bash
+        run: |
+          GOFLAGS=-v make integration 2>&1 | tee integration.log
+          if grep -q 'gopls not on PATH' integration.log; then
+            echo "::error::gopls integration tests were skipped"
+            exit 1
+          fi
+
+  package:
+    name: Cross-Compile
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Cross-Compile & Package Binaries
+        run: VERSION=ci make package
