@@ -8,22 +8,50 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 )
 
-// SampleFile is the only file of the sample workspace (testdata/sample).
+// SampleFile is the main file of the sample workspace (testdata/sample),
+// in package example.com/sample.
 const SampleFile = "shapes.go"
 
-// SampleBuiltinURI is where the scenario says float64 is declared, as gopls
-// points into $GOROOT/src/builtin. It is outside the workspace and does not
-// exist, so a client that tries to read it fails.
+// SampleReportFile is the file of package example.com/sample/report, which
+// imports the sample package, fmt and strings. The path is relative to
+// the root, with slashes.
+const SampleReportFile = "report/report.go"
+
+// sampleFiles are the files of the sample workspace, in order.
+var sampleFiles = []string{SampleFile, SampleReportFile}
+
+// SampleBuiltinURI is where the scenario says float64 and string are
+// declared, as gopls points into $GOROOT/src/builtin. It is outside the
+// workspace and does not exist, so a client that tries to read it fails.
 const SampleBuiltinURI = "file:///lspfake-goroot/src/builtin/builtin.go"
 
-// builtinFloat64 is the name of float64 in SampleBuiltinURI.
-var builtinFloat64 = span{position{59, 5}, position{59, 12}}
+// builtins are the names of the predeclared types in SampleBuiltinURI.
+var builtins = map[string]span{
+	"float64": {position{59, 5}, position{59, 12}},
+	"string":  {position{72, 5}, position{72, 11}},
+}
+
+// external is a function outside the workspace that the sample calls, as
+// gopls reports it from $GOROOT.
+type external struct {
+	name, uri, detail string
+	sel               span
+}
+
+var sampleExternals = map[string]external{
+	"fmt.Sprintf": {"Sprintf", "file:///lspfake-goroot/src/fmt/print.go", "fmt • print.go",
+		span{position{236, 5}, position{236, 12}}},
+	"strings.ToUpper": {"ToUpper", "file:///lspfake-goroot/src/strings/strings.go", "strings • strings.go",
+		span{position{686, 5}, position{686, 12}}},
+}
 
 // errNotApplicable is how gopls (code 0) refuses a request that does not
 // apply to the symbol, e.g. call hierarchy on a type.
@@ -32,6 +60,7 @@ func errNotApplicable(msg string) error { return &Error{Code: 0, Message: msg} }
 // LSP SymbolKind values used by the sample.
 const (
 	KindMethod    = 6
+	KindField     = 8
 	KindInterface = 11
 	KindFunction  = 12
 	KindStruct    = 23
@@ -85,8 +114,8 @@ func SampleRoot() (string, error) {
 // Sample scripts s to answer like gopls for the sample workspace.
 //
 // The workspace root is taken from the initialise request (rootUri, or the
-// first workspace folder), and every position is computed from shapes.go on
-// disk, so the responses cannot drift from the fixture.
+// first workspace folder), and every position is computed from the files
+// on disk, so the responses cannot drift from the fixture.
 //
 // Call hierarchy items carry a "data" field and incoming/outgoing calls fail
 // with InvalidParams when it is not sent back unchanged, as gopls requires.
@@ -94,15 +123,24 @@ func SampleRoot() (string, error) {
 // Like gopls (v0.23), it also:
 //   - names concrete methods "(T).M" in the outline, and starts the range of
 //     a type or interface method at its name;
+//   - lists struct fields as children of their struct, all fields declared
+//     together ("W, H float64") sharing one range;
 //   - gives call hierarchy items kind Function and the name as their range;
-//   - answers prepareCallHierarchy on a type, and implementation on a
-//     function, with an error;
+//   - answers prepareCallHierarchy on a type, field or package name, and
+//     implementation on a function, field or package name, with an error;
 //   - lists TotalArea as a caller of Rect.Area (dynamic dispatch through
 //     Shape), but not Rect.Area as a callee of TotalArea;
-//   - answers typeDefinition of a function with its result type, which for
-//     float64 is SampleBuiltinURI;
-//   - formats hover with rules, a pkg.go.dev link, a size comment on types
-//     and the method set of a struct.
+//   - answers typeDefinition of a function or field with its type, which
+//     for float64 and string is SampleBuiltinURI;
+//   - reports calls into the standard library at $GOROOT-like URIs;
+//   - answers definition on the name in a package clause with that name,
+//     and references with the import specs that import the package;
+//   - formats hover with rules, a pkg.go.dev link, a layout comment on the
+//     declaration of a type or field and the method set of a struct, and
+//     hover on a package name with its path, module and Go version.
+//
+// It does not answer requests on the package qualifiers in selectors
+// ("fmt" in fmt.Sprintf).
 func Sample(s *Server) {
 	sc := &sampleScenario{}
 	initialise := func(_ context.Context, p json.RawMessage) (any, error) {
@@ -124,81 +162,87 @@ func Sample(s *Server) {
 	// Answer both spellings, so the scenario works whichever the client sends.
 	s.Handle("initialise", initialise)
 	s.Handle("initialize", initialise)
-	s.Handle("textDocument/definition", sc.positional(func(sym *symbol, _ json.RawMessage) (any, error) {
-		return sc.location(sym.sel), nil
+	s.Handle("textDocument/definition", sc.positional(func(sym *symbol, _ position, _ json.RawMessage) (any, error) {
+		return sym.location(sym.sel), nil
 	}))
-	s.Handle("textDocument/typeDefinition", sc.positional(func(sym *symbol, _ json.RawMessage) (any, error) {
+	s.Handle("textDocument/typeDefinition", sc.positional(func(sym *symbol, _ position, _ json.RawMessage) (any, error) {
+		if sym.header {
+			return nil, errNotApplicable("no enclosing expression has a type")
+		}
+		if sp, ok := builtins[sym.typeOf]; ok {
+			return []location{{URI: SampleBuiltinURI, Range: sp}}, nil
+		}
 		switch {
-		case sym.typeOf == "float64":
-			return []location{{URI: SampleBuiltinURI, Range: builtinFloat64}}, nil
 		case sym.typeOf != "":
-			return []location{sc.location(sc.syms[sym.typeOf].sel)}, nil
+			t := sc.syms[sym.typeOf]
+			return []location{t.location(t.sel)}, nil
 		case sym.isType():
-			return []location{sc.location(sym.sel)}, nil
+			return []location{sym.location(sym.sel)}, nil
 		}
 		return nil, nil
 	}))
-	s.Handle("textDocument/implementation", sc.positional(func(sym *symbol, _ json.RawMessage) (any, error) {
-		if sym.kind == KindFunction {
+	s.Handle("textDocument/implementation", sc.positional(func(sym *symbol, _ position, _ json.RawMessage) (any, error) {
+		switch {
+		case sym.header:
+			return nil, errNotApplicable(sym.name + " denotes unknown object")
+		case sym.kind == KindFunction:
 			return nil, errNotApplicable(sym.name + " is a function, not a method (query at 'func' token to find matching signatures)")
+		case sym.kind == KindField:
+			return nil, errNotApplicable(sym.name + " is a var, not a type")
 		}
 		out := []location{}
 		for _, key := range sc.implementations(sym.key) {
-			out = append(out, sc.location(sc.syms[key].sel))
+			t := sc.syms[key]
+			out = append(out, t.location(t.sel))
 		}
 		return out, nil
 	}))
-	s.Handle("textDocument/references", sc.positional(func(sym *symbol, p json.RawMessage) (any, error) {
+	s.Handle("textDocument/references", sc.positional(func(sym *symbol, _ position, p json.RawMessage) (any, error) {
 		var params struct {
 			Context struct {
 				IncludeDeclaration bool `json:"includeDeclaration"`
 			} `json:"context"`
 		}
 		_ = json.Unmarshal(p, &params)
-		var spans []span
+		var out []location
 		if params.Context.IncludeDeclaration {
-			spans = append(spans, sym.sel)
+			out = append(out, sym.location(sym.sel))
 		}
 		for _, c := range sc.calls {
 			if c.to == sym.key || c.dynamic == sym.key {
-				spans = append(spans, c.sites...)
+				from := sc.syms[c.from]
+				for _, site := range c.sites {
+					out = append(out, from.location(site))
+				}
 			}
 		}
-		spans = append(spans, sym.uses...)
-		sortSpans(spans)
-		out := []location{}
-		for _, sp := range spans {
-			out = append(out, sc.location(sp))
+		out = append(out, sym.uses...)
+		sortLocations(out)
+		if out == nil {
+			out = []location{}
 		}
 		return out, nil
 	}))
-	s.Handle("textDocument/hover", sc.positional(func(sym *symbol, _ json.RawMessage) (any, error) {
-		value := "```go\n" + sym.signature + "\n```\n\n---\n\n"
-		if sym.doc != "" {
-			value += sym.doc + "\n\n\n"
-		}
-		if sym.methods != "" {
-			value += "```go\n" + sym.methods + "\n```\n\n---\n\n"
-		} else if sym.doc != "" {
-			value += "---\n\n"
-		}
-		value += "[`" + sym.linkName + "` on pkg.go.dev](https://pkg.go.dev/example.com/sample#" + sym.key + ")"
+	s.Handle("textDocument/hover", sc.positional(func(sym *symbol, pos position, _ json.RawMessage) (any, error) {
 		return map[string]any{
-			"contents": map[string]any{"kind": "markdown", "value": value},
+			"contents": map[string]any{"kind": "markdown", "value": sc.hover(sym, pos)},
 			"range":    sym.sel,
 		}, nil
 	}))
-	s.Handle("textDocument/prepareCallHierarchy", sc.positional(func(sym *symbol, _ json.RawMessage) (any, error) {
-		if sym.kind != KindFunction && sym.kind != KindMethod {
+	s.Handle("textDocument/prepareCallHierarchy", sc.positional(func(sym *symbol, _ position, _ json.RawMessage) (any, error) {
+		switch {
+		case sym.header:
+			return nil, errNotApplicable("no symbol here")
+		case sym.kind != KindFunction && sym.kind != KindMethod:
 			return nil, errNotApplicable(sym.name + " is not a function")
 		}
-		return []callHierarchyItem{sc.item(sym)}, nil
+		return []callHierarchyItem{sym.item()}, nil
 	}))
 	s.Handle("callHierarchy/incomingCalls", sc.hierarchy(func(sym *symbol) any {
 		out := []map[string]any{}
 		for _, c := range sc.calls {
 			if c.to == sym.key || c.dynamic == sym.key {
-				out = append(out, map[string]any{"from": sc.item(sc.syms[c.from]), "fromRanges": c.sites})
+				out = append(out, map[string]any{"from": sc.syms[c.from].item(), "fromRanges": c.sites})
 			}
 		}
 		return out
@@ -206,9 +250,16 @@ func Sample(s *Server) {
 	s.Handle("callHierarchy/outgoingCalls", sc.hierarchy(func(sym *symbol) any {
 		out := []map[string]any{}
 		for _, c := range sc.calls {
-			if c.from == sym.key {
-				out = append(out, map[string]any{"to": sc.item(sc.syms[c.to]), "fromRanges": c.sites})
+			if c.from != sym.key {
+				continue
 			}
+			to := map[string]any{"to": nil, "fromRanges": c.sites}
+			if ext, ok := sampleExternals[c.to]; ok {
+				to["to"] = ext.item(c.to)
+			} else {
+				to["to"] = sc.syms[c.to].item()
+			}
+			out = append(out, to)
 		}
 		return out
 	}))
@@ -224,26 +275,28 @@ func Sample(s *Server) {
 		if sc.syms == nil {
 			return nil, &Error{Code: -32002, Message: "server not initialised"}
 		}
-		if path, err := uriPath(params.TextDocument.URI); err != nil || path != sc.path {
+		f := sc.file(params.TextDocument.URI)
+		if f == nil {
 			return nil, nil
 		}
-		// Hierarchical, as gopls answers: interface methods are children
-		// of their interface; everything else is top level.
+		// Hierarchical, as gopls answers: interface methods and struct
+		// fields are children of their type; everything else is top level.
 		var top []map[string]any
-		var shape map[string]any
+		byKey := map[string]map[string]any{}
 		for _, key := range sc.order {
 			sym := sc.syms[key]
+			if sym.file != f {
+				continue
+			}
 			ds := map[string]any{
 				"name": sym.outlineName(), "kind": sym.kind,
 				"range": sym.full, "selectionRange": sym.sel,
 			}
-			switch key {
-			case "Shape":
-				shape = ds
-				top = append(top, ds)
-			case "Shape.Area":
-				shape["children"] = []map[string]any{ds}
-			default:
+			byKey[key] = ds
+			if parent := byKey[sym.parent]; parent != nil {
+				children, _ := parent["children"].([]map[string]any)
+				parent["children"] = append(children, ds)
+			} else {
 				top = append(top, ds)
 			}
 		}
@@ -270,18 +323,23 @@ func (sp span) contains(p position) bool {
 	return after && before
 }
 
-func sortSpans(s []span) {
-	sort.Slice(s, func(i, j int) bool {
-		if s[i].Start.Line != s[j].Start.Line {
-			return s[i].Start.Line < s[j].Start.Line
-		}
-		return s[i].Start.Character < s[j].Start.Character
-	})
-}
-
 type location struct {
 	URI   string `json:"uri"`
 	Range span   `json:"range"`
+}
+
+// sortLocations orders locations by URI, then position, as gopls does.
+func sortLocations(locs []location) {
+	sort.Slice(locs, func(i, j int) bool {
+		a, b := locs[i], locs[j]
+		if a.URI != b.URI {
+			return a.URI < b.URI
+		}
+		if a.Range.Start.Line != b.Range.Start.Line {
+			return a.Range.Start.Line < b.Range.Start.Line
+		}
+		return a.Range.Start.Character < b.Range.Start.Character
+	})
 }
 
 type callHierarchyItem struct {
@@ -294,21 +352,60 @@ type callHierarchyItem struct {
 	Data           json.RawMessage `json:"data"`
 }
 
+func itemData(key string) json.RawMessage {
+	data, _ := json.Marshal(map[string]string{"key": key})
+	return data
+}
+
+func (ext external) item(key string) callHierarchyItem {
+	return callHierarchyItem{Name: ext.name, Kind: KindFunction, Detail: ext.detail, URI: ext.uri,
+		Range: ext.sel, SelectionRange: ext.sel, Data: itemData(key)}
+}
+
+// sampleFile is one file of the sample workspace and its package.
+type sampleFile struct {
+	rel       string // relative to the root, with slashes
+	path, uri string
+	lines     []string
+	pkgPath   string // import path
+	pkgName   string
+	pkgDoc    string  // the package doc comment, without "// "
+	header    *symbol // the name in the package clause
+}
+
 type symbol struct {
 	key       string // unique, e.g. "Rect.Area"
 	name      string
 	kind      int
-	decl      string // unique line prefix that declares the symbol
-	typeOf    string // key of the symbol's result type, or "float64"
+	in        string // the file, relative to the root
+	file      *sampleFile
+	parent    string // key of the type it is nested in, in the outline
+	decl      string // unique line prefix that declares the symbol (not fields)
+	typeOf    string // key of the symbol's type, or a builtin type
 	full, sel span
 	signature string // as gopls hovers it; derived from the source if empty
 	doc       string
-	linkName  string // the pkg.go.dev link text
-	methods   string // a struct's method set, as gopls hovers it
-	uses      []span // a type's uses, for references and definition
+	linkName  string     // the pkg.go.dev link text
+	methods   string     // a struct's method set, as gopls hovers it
+	uses      []location // a type's or field's uses, for references and definition
+	header    bool       // the name in a package clause
 }
 
 func (sym *symbol) isType() bool { return sym.kind == KindInterface || sym.kind == KindStruct }
+
+func (sym *symbol) location(sp span) location { return location{URI: sym.file.uri, Range: sp} }
+
+func (sym *symbol) item() callHierarchyItem {
+	return callHierarchyItem{
+		Name:           sym.name,
+		Detail:         sym.file.pkgPath + " • " + path.Base(sym.file.rel),
+		URI:            sym.file.uri,
+		Kind:           KindFunction,
+		Range:          sym.sel,
+		SelectionRange: sym.sel,
+		Data:           itemData(sym.key),
+	}
+}
 
 // outlineName is the documentSymbol name: gopls writes "(T).M" for a
 // concrete method, and plain "M" for an interface method.
@@ -320,34 +417,42 @@ func (sym *symbol) outlineName() string {
 }
 
 type call struct {
-	from, to string
+	from, to string // to is a symbol key or a key of sampleExternals
 	needle   string
-	sites    []span
+	sites    []span // in the file of from
 	dynamic  string // a concrete method the call reaches through the interface
 }
 
 type sampleScenario struct {
-	mu    sync.Mutex
-	path  string // absolute path of shapes.go
-	uri   string
-	syms  map[string]*symbol
-	order []string
-	calls []*call
+	mu        sync.Mutex
+	modPath   string
+	goVersion string // from go.mod, e.g. "1.26"
+	files     []*sampleFile
+	syms      map[string]*symbol
+	order     []string
+	calls     []*call
 }
 
-// sampleSymbols describes every declaration in shapes.go.
+// sampleSymbols describes every declaration in the sample, in file order.
+// Fields come after their struct.
 func sampleSymbols() []*symbol {
 	return []*symbol{
-		{key: "Shape", name: "Shape", kind: KindInterface, decl: "type Shape interface"},
-		{key: "Shape.Area", name: "Area", kind: KindMethod, decl: "\tArea() float64", typeOf: "float64",
+		{key: "Shape", name: "Shape", kind: KindInterface, in: SampleFile, decl: "type Shape interface"},
+		{key: "Shape.Area", name: "Area", kind: KindMethod, in: SampleFile, parent: "Shape", decl: "\tArea() float64", typeOf: "float64",
 			signature: "func (Shape) Area() float64", linkName: "(sample.Shape).Area"},
-		{key: "Rect", name: "Rect", kind: KindStruct, decl: "type Rect struct", methods: "func (r Rect) Area() float64"},
-		{key: "Rect.Area", name: "Area", kind: KindMethod, decl: "func (r Rect) Area()", typeOf: "float64",
+		{key: "Rect", name: "Rect", kind: KindStruct, in: SampleFile, decl: "type Rect struct", methods: "func (r Rect) Area() float64"},
+		{key: "Rect.W", name: "W", kind: KindField, in: SampleFile, parent: "Rect", typeOf: "float64",
+			signature: "field W float64 // size=8, offset=0", linkName: "(sample.Rect).W"},
+		{key: "Rect.H", name: "H", kind: KindField, in: SampleFile, parent: "Rect", typeOf: "float64",
+			signature: "field H float64 // size=8, offset=8", linkName: "(sample.Rect).H"},
+		{key: "Rect.Area", name: "Area", kind: KindMethod, in: SampleFile, decl: "func (r Rect) Area()", typeOf: "float64",
 			linkName: "(sample.Rect).Area"},
-		{key: "NewRect", name: "NewRect", kind: KindFunction, decl: "func NewRect(", typeOf: "Rect",
+		{key: "NewRect", name: "NewRect", kind: KindFunction, in: SampleFile, decl: "func NewRect(", typeOf: "Rect",
 			signature: "func NewRect(w float64, h float64) Rect"},
-		{key: "TotalArea", name: "TotalArea", kind: KindFunction, decl: "func TotalArea(", typeOf: "float64"},
-		{key: "Report", name: "Report", kind: KindFunction, decl: "func Report(", typeOf: "float64"},
+		{key: "TotalArea", name: "TotalArea", kind: KindFunction, in: SampleFile, decl: "func TotalArea(", typeOf: "float64"},
+		{key: "Report", name: "Report", kind: KindFunction, in: SampleFile, decl: "func Report(", typeOf: "float64"},
+		{key: "Describe", name: "Describe", kind: KindFunction, in: SampleReportFile, decl: "func Describe(", typeOf: "string"},
+		{key: "Label", name: "Label", kind: KindFunction, in: SampleReportFile, decl: "func Label(", typeOf: "string"},
 	}
 }
 
@@ -356,6 +461,8 @@ func sampleCalls() []*call {
 		{from: "TotalArea", to: "Shape.Area", needle: "Area(", dynamic: "Rect.Area"},
 		{from: "Report", to: "TotalArea", needle: "TotalArea("},
 		{from: "Report", to: "NewRect", needle: "NewRect("},
+		{from: "Describe", to: "fmt.Sprintf", needle: "Sprintf("},
+		{from: "Label", to: "strings.ToUpper", needle: "ToUpper("},
 	}
 }
 
@@ -393,35 +500,66 @@ func (sc *sampleScenario) load(params json.RawMessage) error {
 	if err != nil {
 		return fmt.Errorf("root: %w", err)
 	}
-	path := filepath.Join(dir, SampleFile)
-	src, err := os.ReadFile(path)
+	gomod, err := os.ReadFile(filepath.Join(dir, "go.mod"))
 	if err != nil {
 		return err
 	}
-	lines := strings.Split(string(src), "\n")
 
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
-	sc.path = path
-	sc.uri = (&url.URL{Scheme: "file", Path: filepath.ToSlash(path)}).String()
+	sc.modPath, sc.goVersion = "", ""
+	for _, line := range strings.Split(string(gomod), "\n") {
+		if f := strings.Fields(line); len(f) == 2 && f[0] == "module" {
+			sc.modPath = f[1]
+		} else if len(f) == 2 && f[0] == "go" {
+			sc.goVersion = f[1]
+		}
+	}
+	sc.files = nil
+	byRel := map[string]*sampleFile{}
+	for _, rel := range sampleFiles {
+		f, err := sc.loadFile(dir, rel)
+		if err != nil {
+			return err
+		}
+		sc.files = append(sc.files, f)
+		byRel[rel] = f
+	}
 	sc.syms = map[string]*symbol{}
 	sc.order = nil
 	for _, sym := range sampleSymbols() {
-		if err := sym.locate(lines); err != nil {
+		sym.file = byRel[sym.in]
+		var err error
+		if sym.kind == KindField {
+			err = sym.locateField(sc.syms[sym.parent])
+		} else {
+			err = sym.locate()
+		}
+		if err != nil {
 			return err
 		}
 		sc.syms[sym.key] = sym
 		sc.order = append(sc.order, sym.key)
-		if sym.isType() {
-			sym.uses = typeUses(lines, sym)
+	}
+	for _, key := range sc.order {
+		if sym := sc.syms[key]; sym.isType() || sym.kind == KindField {
+			sym.uses = sc.identUses(sym)
 		}
+	}
+	for _, f := range sc.files {
+		f.header.uses = sc.importSpecs(f.pkgPath)
 	}
 	sc.calls = sampleCalls()
 	for _, c := range sc.calls {
 		from := sc.syms[c.from]
-		for l := from.full.Start.Line + 1; l <= from.full.End.Line; l++ {
+		lines := from.file.lines
+		for l := from.full.Start.Line; l <= from.full.End.Line; l++ {
 			line := lines[l]
-			for off := 0; ; {
+			off := 0
+			if l == from.sel.Start.Line {
+				off = from.sel.End.Character // not the declaration's own name
+			}
+			for {
 				i := strings.Index(line[off:], c.needle)
 				if i < 0 {
 					break
@@ -439,9 +577,44 @@ func (sc *sampleScenario) load(params json.RawMessage) error {
 	return nil
 }
 
-// locate fills the symbol's ranges, signature and doc from the file lines.
+// loadFile reads one file of the workspace and its package clause.
+func (sc *sampleScenario) loadFile(root, rel string) (*sampleFile, error) {
+	p := filepath.Join(root, filepath.FromSlash(rel))
+	src, err := os.ReadFile(p)
+	if err != nil {
+		return nil, err
+	}
+	f := &sampleFile{
+		rel:   rel,
+		path:  p,
+		uri:   (&url.URL{Scheme: "file", Path: filepath.ToSlash(p)}).String(),
+		lines: strings.Split(string(src), "\n"),
+	}
+	f.pkgPath = sc.modPath
+	if d := path.Dir(rel); d != "." {
+		f.pkgPath += "/" + d
+	}
+	for i, line := range f.lines {
+		name, ok := strings.CutPrefix(line, "package ")
+		if !ok {
+			continue
+		}
+		f.pkgName = name
+		if i > 0 {
+			f.pkgDoc, _ = strings.CutPrefix(f.lines[i-1], "// ")
+		}
+		f.header = &symbol{key: "package " + f.pkgPath, name: name, file: f, header: true,
+			sel: span{position{i, len("package ")}, position{i, len("package ") + len(name)}}}
+		f.header.full = f.header.sel
+		return f, nil
+	}
+	return nil, fmt.Errorf("lspfake: no package clause in %s", rel)
+}
+
+// locate fills the symbol's ranges, signature and doc from its file.
 // The fixture is ASCII, so byte offsets equal UTF-16 offsets.
-func (sym *symbol) locate(lines []string) error {
+func (sym *symbol) locate() error {
+	lines := sym.file.lines
 	for i, line := range lines {
 		if !strings.HasPrefix(line, sym.decl) {
 			continue
@@ -475,7 +648,7 @@ func (sym *symbol) locate(lines []string) error {
 			sym.signature, _, _ = strings.Cut(strings.TrimSpace(line), " {")
 		}
 		if sym.linkName == "" {
-			sym.linkName = "sample." + sym.key
+			sym.linkName = sym.file.pkgName + "." + sym.key
 		}
 		if i > 0 {
 			if doc, ok := strings.CutPrefix(strings.TrimSpace(lines[i-1]), "// "); ok {
@@ -487,69 +660,156 @@ func (sym *symbol) locate(lines []string) error {
 	return fmt.Errorf("lspfake: declaration %q not found", sym.decl)
 }
 
-// typeUses finds the uses of a type: its name as a whole identifier, outside
-// comments and its own declaration.
-func typeUses(lines []string, sym *symbol) []span {
+// locateField fills a field's ranges from its struct's one-line
+// declaration, "type T struct{ A, B float64 }". As with gopls, the range of
+// each field is the whole field list.
+func (sym *symbol) locateField(parent *symbol) error {
+	i := parent.sel.Start.Line
+	line := sym.file.lines[i]
+	open, closing := strings.Index(line, "{")+1, strings.LastIndex(line, "}")
+	if open == 0 || closing < open {
+		return fmt.Errorf("lspfake: struct %s is not on one line", parent.name)
+	}
+	list := line[open:closing]
+	start := open + len(list) - len(strings.TrimLeft(list, " "))
+	end := open + len(strings.TrimRight(list, " "))
+	for _, sp := range identSpans(line, sym.name) {
+		if sp.start >= start && sp.end <= end {
+			sym.full = span{position{i, start}, position{i, end}}
+			sym.sel = span{position{i, sp.start}, position{i, sp.end}}
+			return nil
+		}
+	}
+	return fmt.Errorf("lspfake: field %s not found in %s", sym.name, parent.name)
+}
+
+type colSpan struct{ start, end int }
+
+// identSpans returns where name occurs in line as a whole identifier.
+func identSpans(line, name string) []colSpan {
 	isIdent := func(b byte) bool {
 		return b == '_' || '0' <= b && b <= '9' || 'a' <= b && b <= 'z' || 'A' <= b && b <= 'Z'
 	}
-	var out []span
-	for l, line := range lines {
-		if l == sym.sel.Start.Line || strings.HasPrefix(strings.TrimSpace(line), "//") {
-			continue
+	var out []colSpan
+	for off := 0; ; {
+		i := strings.Index(line[off:], name)
+		if i < 0 {
+			return out
 		}
-		for off := 0; ; {
-			i := strings.Index(line[off:], sym.name)
-			if i < 0 {
-				break
+		col, end := off+i, off+i+len(name)
+		if (col == 0 || !isIdent(line[col-1])) && (end == len(line) || !isIdent(line[end])) {
+			out = append(out, colSpan{col, end})
+		}
+		off = end
+	}
+}
+
+// identUses finds the uses of a type or field in every file: its name as a
+// whole identifier, outside comments and the line that declares it.
+func (sc *sampleScenario) identUses(sym *symbol) []location {
+	var out []location
+	for _, f := range sc.files {
+		for l, line := range f.lines {
+			if f == sym.file && l == sym.sel.Start.Line || strings.HasPrefix(strings.TrimSpace(line), "//") {
+				continue
 			}
-			col, end := off+i, off+i+len(sym.name)
-			if (col == 0 || !isIdent(line[col-1])) && (end == len(line) || !isIdent(line[end])) {
-				out = append(out, span{position{l, col}, position{l, end}})
+			for _, sp := range identSpans(line, sym.name) {
+				out = append(out, location{URI: f.uri, Range: span{position{l, sp.start}, position{l, sp.end}}})
 			}
-			off = end
 		}
 	}
 	return out
 }
 
-func (sc *sampleScenario) location(sp span) location {
-	return location{URI: sc.uri, Range: sp}
+// importSpecs finds the import specs, on lines of their own, that import
+// pkgPath: gopls answers references to a package name with them.
+func (sc *sampleScenario) importSpecs(pkgPath string) []location {
+	quoted := strconv.Quote(pkgPath)
+	var out []location
+	for _, f := range sc.files {
+		for l, line := range f.lines {
+			if strings.TrimSpace(line) == quoted {
+				col := strings.Index(line, quoted)
+				out = append(out, location{URI: f.uri, Range: span{position{l, col}, position{l, col + len(quoted)}}})
+			}
+		}
+	}
+	return out
 }
 
-func (sc *sampleScenario) item(sym *symbol) callHierarchyItem {
-	data, _ := json.Marshal(map[string]string{"key": sym.key})
-	return callHierarchyItem{
-		Name:           sym.name,
-		Detail:         "example.com/sample • " + SampleFile,
-		URI:            sc.uri,
-		Kind:           KindFunction,
-		Range:          sym.sel,
-		SelectionRange: sym.sel,
-		Data:           data,
+// hover is the hover Markdown for sym, asked at pos.
+func (sc *sampleScenario) hover(sym *symbol, pos position) string {
+	if sym.header {
+		f := sym.file
+		value := "```go\npackage " + f.pkgName + "\n```\n\n---\n\n"
+		if f.pkgDoc != "" {
+			value += f.pkgDoc + "\n\n\n---\n\n"
+		}
+		return value + " - Package path: " + f.pkgPath + "\n - Module: " + sc.modPath + "\n - Language version: go" + sc.goVersion
 	}
+	signature := sym.signature
+	if sym.kind == KindField && !sym.sel.contains(pos) {
+		// At a use, gopls leaves out the field's layout.
+		signature, _, _ = strings.Cut(signature, " //")
+	}
+	value := "```go\n" + signature + "\n```\n\n---\n\n"
+	if sym.doc != "" {
+		value += sym.doc + "\n\n\n"
+	}
+	if sym.methods != "" {
+		value += "```go\n" + sym.methods + "\n```\n\n---\n\n"
+	} else if sym.doc != "" {
+		value += "---\n\n"
+	}
+	return value + "[`" + sym.linkName + "` on pkg.go.dev](https://pkg.go.dev/" + sym.file.pkgPath + "#" + sym.key + ")"
+}
+
+// file returns the workspace file at uri, or nil.
+func (sc *sampleScenario) file(uri string) *sampleFile {
+	p, err := uriPath(uri)
+	if err != nil {
+		return nil
+	}
+	for _, f := range sc.files {
+		if f.path == p {
+			return f
+		}
+	}
+	return nil
 }
 
 // at returns the symbol at pos: the callee when pos is on a call site, the
-// declared symbol when pos is on a declaration's name, otherwise nil.
+// declared symbol when pos is on a declaration's name or a use of a type
+// or field, the package when pos is on the name in the package clause,
+// otherwise nil.
 func (sc *sampleScenario) at(uri string, pos position) *symbol {
-	if p, err := uriPath(uri); err != nil || p != sc.path {
+	f := sc.file(uri)
+	if f == nil {
 		return nil
 	}
 	for _, c := range sc.calls {
+		if sc.syms[c.from].file != f {
+			continue
+		}
 		for _, site := range c.sites {
 			if site.contains(pos) {
+				if _, ok := sampleExternals[c.to]; ok {
+					return nil // not modelled
+				}
 				return sc.syms[c.to]
 			}
 		}
 	}
+	if f.header.sel.contains(pos) {
+		return f.header
+	}
 	for _, key := range sc.order {
 		sym := sc.syms[key]
-		if sym.sel.contains(pos) {
+		if sym.file == f && sym.sel.contains(pos) {
 			return sym
 		}
 		for _, use := range sym.uses {
-			if use.contains(pos) {
+			if use.URI == f.uri && use.Range.contains(pos) {
 				return sym
 			}
 		}
@@ -559,7 +819,7 @@ func (sc *sampleScenario) at(uri string, pos position) *symbol {
 
 // positional adapts f to a textDocument/* request. It answers null when no
 // symbol is at the requested position.
-func (sc *sampleScenario) positional(f func(*symbol, json.RawMessage) (any, error)) Handler {
+func (sc *sampleScenario) positional(f func(*symbol, position, json.RawMessage) (any, error)) Handler {
 	return func(_ context.Context, p json.RawMessage) (any, error) {
 		var params struct {
 			TextDocument struct {
@@ -579,7 +839,7 @@ func (sc *sampleScenario) positional(f func(*symbol, json.RawMessage) (any, erro
 		if sym == nil {
 			return nil, nil
 		}
-		return f(sym, p)
+		return f(sym, params.Position, p)
 	}
 }
 

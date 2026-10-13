@@ -39,6 +39,21 @@ The builder depends only on a narrow `SymbolSource` interface, not on the concre
 client. That lets the graph logic be unit-tested against an in-memory fake graph, and lets
 the LSP client be tested against an in-process fake server.
 
+`internal/graph`, `internal/lsp` and `internal/render` know nothing about any one
+programming language. What differs between languages lives in `internal/lspsource`, behind
+the `Language` interface, chosen by file extension:
+
+| Part           | Question it answers                                              | Generic                       | Go                                              |
+|----------------|------------------------------------------------------------------|-------------------------------|-------------------------------------------------|
+| `Naming`       | Short and qualified name of an outline entry; the type that owns a member declared outside it | names as given; members nested in the outline | `(T).M` is `M`, qualified `T.M`, owned by `T` |
+| `Declarations` | Where a declaration really starts                                | as the server says            | widened over the `type` keyword                 |
+| `HoverReader`  | Signature and doc from hover Markdown                            | first code block, then prose  | also drops gopls layout comments, method sets, links and package facts |
+| `Modules`      | The module a file belongs to, its files and header, what it imports | none                       | the package in the file's directory (`go/parser`, `go.mod`) |
+
+A language is a struct composed of one implementation of each part, so a new language
+reuses the generic parts that fit (an object-oriented language nests members in the
+outline, as the generic `Naming` expects) and supplies only what differs.
+
 ## Request flow for `inspect_ego`
 
 The handshake is sent as `initialise` / `initialised` first. If the server answers that with
@@ -79,7 +94,7 @@ sequenceDiagram
 ## Data structures
 
 ```go
-type NodeID string // "<uri>#L<startLine>:<startChar>", stable and unique
+type NodeID string // "<uri>#L<startLine>:<startChar>", or "module:<path>" for a module
 
 type Range struct{ StartLine, StartCol, EndLine, EndCol int } // 1-based for output
 
@@ -87,17 +102,17 @@ type Node struct {
     ID        NodeID
     Name      string     // e.g. "Builder.Build"
     Qualified string     // e.g. "graph.Builder.Build"
-    Kind      SymbolKind // function, method, struct, interface, ...
-    URI       string
-    Range     Range      // full declaration range
-    Selection Range      // identifier range
+    Kind      SymbolKind // module, function, method, struct, interface, field, ...
+    URI       string     // a module's directory, or "" outside the workspace
+    Range     Range      // full declaration range; zero for a module
+    Selection Range      // identifier range; zero for a module
     Signature string
     Doc       string
     Body      string     // only filled for the ego, unless --body=all
     Hop       int        // 0 = ego
 }
 
-type EdgeKind string // calls | implements | instantiates | imports | references
+type EdgeKind string // calls | implements | instantiates | imports | contains | references
 
 type Edge struct {
     From, To NodeID
@@ -121,7 +136,18 @@ type EgoGraph struct {
 | `implements`   | concrete to interface | `textDocument/implementation` on the type or method | Orientation from the outline: an interface, or a method inside one, is the target. |
 | `instantiates` | user to type | `textDocument/typeDefinition` on the symbol's name (e.g. a constructor's result type) | Best-effort; depends on server support. |
 | `references`   | referrer to symbol | `textDocument/references` (excluding the declaration), grouped by enclosing symbol | Fallback when call hierarchy is unsupported. |
-| `imports`      | file to package | Not derived yet. | The builder supports the kind; the LSP-backed source returns no `imports` edges. |
+| `imports`      | module to module | Read by the `Language` from the module's files (Go: the import declarations, with `go/parser`) | Weight = number of files that import it. Only outgoing: who imports a module is not derived. |
+| `contains`     | parent to member | `textDocument/documentSymbol` (the outline), plus the `Language`'s owner of members declared outside their type | A module contains its top-level symbols; a type its fields and methods (Go methods are matched by receiver). |
+
+A **module** is the unit code imports: a Go package, a Python module, a Rust crate. A module
+node has no position. Its id is `module:<path>`, where the path is what importers write, for
+example `module:example.com/sample/report` or `module:fmt`. A module in the workspace keeps
+its directory as its URI, and its signature and doc come from hover on its name in its first
+file (`package report`). Any other module (the standard library, the module cache) is known
+by its path alone: no URI, no hover, no members, no imports. The ego is a module when the
+position is on its name in a file's module declaration. Only `contains` and `imports` leave
+a module, and no request about a module is sent to the server except that hover. `find_references`
+on a module is a runtime error (exit code 2): references to modules are not derived.
 
 `textDocument/definition` resolves the ego when the cursor is on a use site rather than on
 the declaration. `textDocument/documentSymbol` supplies names, kinds and full ranges for
@@ -155,7 +181,10 @@ offset=…`), horizontal rules, the method-set code block and the pkg.go.dev lin
 - An edge seen from both of its ends is stored once. Its weight is the larger of the two
   reported weights, not their sum.
 - Default edge kinds are `calls,implements,instantiates,imports`. `references` is opt-in,
-  because with call hierarchy available it duplicates `calls`.
+  because with call hierarchy available it duplicates `calls`. `contains` is opt-in, because
+  it lists a whole module or type.
+- `contains` follows the search direction like any other kind: upstream is the parent, then
+  its parent; downstream is the members. Siblings are not alters.
 
 ## Positions
 
@@ -166,8 +195,8 @@ offset=…`), horizontal rules, the method-set code block and the pkg.go.dev lin
 
 ## Determinism rules
 
-1. Nodes are de-duplicated by `(URI, Selection range)`.
-2. Nodes are sorted by `(Hop, URI, StartLine, StartCol)`. Edges are sorted by `(From, To, Kind)`.
+1. Nodes are de-duplicated by `(URI, Selection range)`, modules by their path.
+2. Nodes are sorted by `(Hop, URI, StartLine, StartCol, ID)`. Edges are sorted by `(From, To, Kind)`.
 3. Paths are rendered relative to `--root` using `/` separators.
 4. No timestamps, durations or absolute paths appear in output.
 5. Renderers are covered by golden-file tests (`testdata/*.golden`).
@@ -191,6 +220,7 @@ of `TotalArea` in `testdata/sample`, at depth 2. In outline:
 ## Upstream (callers)        <- incoming edges, grouped by hop
 ## Downstream (callees)      <- outgoing edges, grouped by hop
 ## Implementations
+## Members                   <- contains edges touching the ego, parent first
 ## Type dependencies
 ## Edges                     <- table: from | kind | to | weight
 ```
@@ -198,9 +228,12 @@ of `TotalArea` in `testdata/sample`, at depth 2. In outline:
 Empty sections are rendered as `_none_` and never omitted, so the layout stays fixed.
 Upstream and downstream alters are listed per hop with signature and doc. Their bodies
 appear only with `--body all`. *Implementations* lists `implements` edges touching the ego,
-and *Type dependencies* lists its `instantiates`/`imports` edges. In JSON, every node has a
+*Members* its `contains` edges (its parent marked `parent:`, then its members), and *Type
+dependencies* its `instantiates`/`imports` edges. A module is shown by its path where a symbol
+shows `file:line`. In JSON, every node has a
 `role` (`ego`, `upstream`, `downstream`, `both`, or `related` for a node joined to the graph on neither side of the ego), and ids are `file:line:col` relative to
-`--root`.
+`--root`. A module's id is `module:<path>`; it has no `range`, and a `file` (its directory,
+`.` for the root) only when it is in the workspace.
 
 ## Exit codes
 
@@ -231,9 +264,10 @@ tests still waiting for their code; none are pending at the moment.
 Shared fixtures, which run today:
 
 - `testdata/sample`: a tiny Go module with a known call graph (an interface, an
-  implementation, a constructor and two callers).
+  implementation, a constructor and two callers) in `shapes.go`, and a second package,
+  `report/report.go`, that imports it and two standard-library packages.
 - `internal/lsp/lspfake`: a scripted LSP server with its own framing code, independent of
-  the client. Its `Sample` scenario answers like gopls for `testdata/sample`, computing every
-  position from the file itself. Test binaries re-run themselves as this server (via
+  the client. Its `Sample` scenario answers like gopls v0.23 for `testdata/sample`, computing
+  every position from the files themselves. Test binaries re-run themselves as this server (via
   `EGO_DIR_LSPFAKE=sample`), which tests process spawning and the CLI end to end without
   gopls.

@@ -37,8 +37,8 @@ func TestNewNodeIDFormat(t *testing.T) {
 }
 
 func TestEdgeKinds(t *testing.T) {
-	all := []graph.EdgeKind{graph.EdgeCalls, graph.EdgeImplements, graph.EdgeInstantiates, graph.EdgeImports, graph.EdgeReferences}
-	want := []string{"calls", "implements", "instantiates", "imports", "references"}
+	all := []graph.EdgeKind{graph.EdgeCalls, graph.EdgeImplements, graph.EdgeInstantiates, graph.EdgeImports, graph.EdgeContains, graph.EdgeReferences}
+	want := []string{"calls", "implements", "instantiates", "imports", "contains", "references"}
 	for i, k := range all {
 		if string(k) != want[i] {
 			t.Errorf("edge kind %d = %q, want %q", i, k, want[i])
@@ -54,8 +54,9 @@ func TestParseEdgeKinds(t *testing.T) {
 		{"calls", []graph.EdgeKind{graph.EdgeCalls}},
 		{" implements , calls ", []graph.EdgeKind{graph.EdgeCalls, graph.EdgeImplements}},
 		{"calls,calls", []graph.EdgeKind{graph.EdgeCalls}},
-		{"all", []graph.EdgeKind{graph.EdgeCalls, graph.EdgeImplements, graph.EdgeInstantiates, graph.EdgeImports, graph.EdgeReferences}},
+		{"all", []graph.EdgeKind{graph.EdgeCalls, graph.EdgeImplements, graph.EdgeInstantiates, graph.EdgeImports, graph.EdgeContains, graph.EdgeReferences}},
 		{"imports,references,instantiates", []graph.EdgeKind{graph.EdgeInstantiates, graph.EdgeImports, graph.EdgeReferences}},
+		{"references,contains,imports", []graph.EdgeKind{graph.EdgeImports, graph.EdgeContains, graph.EdgeReferences}},
 	}
 	for _, tc := range tests {
 		got, err := graph.ParseEdgeKinds(tc.in)
@@ -219,5 +220,53 @@ func TestValidateDuplicateNodes(t *testing.T) {
 	g := &graph.EgoGraph{Ego: ego.ID, Nodes: []graph.Node{ego, ego}}
 	if err := g.Validate(); err == nil || !strings.Contains(err.Error(), "duplicate") {
 		t.Errorf("Validate = %v, want a duplicate node error", err)
+	}
+}
+
+func TestNewModuleID(t *testing.T) {
+	if id := graph.NewModuleID("example.com/sample/report"); id != "module:example.com/sample/report" {
+		t.Errorf("NewModuleID = %q", id)
+	}
+	if graph.NewModuleID("fmt") == graph.NewModuleID("example.com/fmt") {
+		t.Error("module IDs must differ by path")
+	}
+}
+
+func TestLocated(t *testing.T) {
+	if !node(uriA, 1, 6, "F", 0).Located() {
+		t.Error("a symbol with a selection should be located")
+	}
+	module := graph.Node{ID: graph.NewModuleID("fmt"), Name: "fmt", Kind: graph.KindModule}
+	if module.Located() {
+		t.Error("a module node has no position")
+	}
+	module.URI = "file:///ws/report" // its directory
+	if module.Located() {
+		t.Error("a module node with a directory still has no position")
+	}
+}
+
+func TestSortBreaksTiesByID(t *testing.T) {
+	ego := node(uriA, 1, 6, "Ego", 0)
+	strs := graph.Node{ID: graph.NewModuleID("strings"), Name: "strings", Kind: graph.KindModule, Hop: 1}
+	fmtm := graph.Node{ID: graph.NewModuleID("fmt"), Name: "fmt", Kind: graph.KindModule, Hop: 1}
+	for _, order := range [][]graph.Node{{ego, strs, fmtm}, {fmtm, ego, strs}} {
+		g := &graph.EgoGraph{Ego: ego.ID, Depth: 1}
+		for _, n := range order {
+			g.AddNode(n)
+		}
+		g.AddEdge(graph.Edge{From: ego.ID, To: strs.ID, Kind: graph.EdgeImports})
+		g.AddEdge(graph.Edge{From: ego.ID, To: fmtm.ID, Kind: graph.EdgeImports})
+		g.Sort()
+		var names []string
+		for _, n := range g.Nodes {
+			names = append(names, n.Name)
+		}
+		if want := []string{"Ego", "fmt", "strings"}; !reflect.DeepEqual(names, want) {
+			t.Errorf("node order = %v, want %v", names, want)
+		}
+		if g.Edges[0].To != fmtm.ID {
+			t.Errorf("edges = %+v, want the edge to fmt first", g.Edges)
+		}
 	}
 }

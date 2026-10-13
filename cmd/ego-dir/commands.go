@@ -79,6 +79,9 @@ func findReferences(ctx context.Context, c *lsp.Client, src *lspsource.Source, u
 	if err != nil {
 		return err
 	}
+	if !target.Located() {
+		return fmt.Errorf("%s is a module: find_references does not support modules", target.Qualified)
+	}
 	// Ask about the declaration, so a use site and its declaration give the
 	// same answer.
 	at := lsp.Position{Line: target.Selection.StartLine - 1}

@@ -371,6 +371,9 @@ func TestSampleTextDocumentRequests(t *testing.T) {
 		return `{"uri":"` + uri + `","range":{"start":{"line":` + itoa(line) + `,"character":` + itoa(from) +
 			`},"end":{"line":` + itoa(line) + `,"character":` + itoa(to) + `}}}`
 	}
+	reportLoc := func(line, from, to int) string {
+		return strings.Replace(loc(line, from, to), lspfake.SampleFile, lspfake.SampleReportFile, 1)
+	}
 	builtin := `{"uri":"` + lspfake.SampleBuiltinURI + `","range":{"start":{"line":59,"character":5},"end":{"line":59,"character":12}}}`
 	tests := []struct {
 		name   string
@@ -394,8 +397,9 @@ func TestSampleTextDocumentRequests(t *testing.T) {
 			withContext(at(uri, 17, 5), true), "[" + loc(17, 5, 14) + "," + loc(27, 8, 17) + "]"},
 		{"references through dynamic dispatch", "textDocument/references",
 			withContext(at(uri, 11, 15), false), "[" + loc(20, 13, 17) + "]"},
+		// gopls sorts by URI: report/report.go comes before shapes.go.
 		{"references of a type", "textDocument/references",
-			withContext(at(uri, 8, 5), false), "[" + loc(11, 8, 12) + "," + loc(14, 27, 31) + "," + loc(14, 41, 45) + "]"},
+			withContext(at(uri, 8, 5), false), "[" + reportLoc(11, 23, 27) + "," + loc(11, 8, 12) + "," + loc(14, 27, 31) + "," + loc(14, 41, 45) + "]"},
 		{"prepare on a type", "textDocument/prepareCallHierarchy", at(uri, 8, 5), "error"},
 	}
 	for i, tc := range tests {
@@ -503,5 +507,126 @@ func TestSampleAcceptsBothHandshakeSpellings(t *testing.T) {
 		if m := p.call(1, method, map[string]any{"rootUri": rootURI}); m.Error != nil || !strings.Contains(string(m.Result), "callHierarchyProvider") {
 			t.Errorf("%s = %+v", method, m)
 		}
+	}
+}
+
+// rangeJSON is a one-line range as the fake encodes it.
+func rangeJSON(line, from, to int) string {
+	return `{"start":{"line":` + itoa(line) + `,"character":` + itoa(from) + `},"end":{"line":` + itoa(line) + `,"character":` + itoa(to) + `}}`
+}
+
+// TestSampleMatchesGoplsProbe checks the answers that gopls v0.23 gave for
+// the fields of Rect, the package clauses and report/report.go.
+func TestSampleMatchesGoplsProbe(t *testing.T) {
+	p, uri := sampleSession(t)
+	report := strings.TrimSuffix(uri, lspfake.SampleFile) + lspfake.SampleReportFile
+	loc := func(u string, line, from, to int) string {
+		return `{"uri":"` + u + `","range":` + rangeJSON(line, from, to) + `}`
+	}
+	builtin := func(line, from, to int) string { return loc(lspfake.SampleBuiltinURI, line, from, to) }
+	tests := []struct {
+		name   string
+		method string
+		params map[string]any
+		want   string // the result, or "error" for an error response
+	}{
+		{"definition of a field", "textDocument/definition", at(uri, 8, 18), loc(uri, 8, 18, 19)},
+		{"definition from a field use in another package", "textDocument/definition", at(report, 12, 31), loc(uri, 8, 18, 19)},
+		{"typeDefinition of a field", "textDocument/typeDefinition", at(uri, 8, 21), "[" + builtin(59, 5, 12) + "]"},
+		{"implementation of a field", "textDocument/implementation", at(uri, 8, 18), "error"},
+		{"prepare on a field", "textDocument/prepareCallHierarchy", at(uri, 8, 18), "error"},
+		{"references of a field", "textDocument/references", withContext(at(uri, 8, 18), false),
+			"[" + loc(report, 12, 31, 32) + "," + loc(uri, 11, 40, 41) + "," + loc(uri, 14, 46, 47) + "]"},
+		{"references of the other field", "textDocument/references", withContext(at(uri, 8, 21), false),
+			"[" + loc(report, 12, 36, 37) + "," + loc(uri, 11, 46, 47) + "," + loc(uri, 14, 52, 53) + "]"},
+		{"definition on a package clause", "textDocument/definition", at(uri, 0, 8), loc(uri, 0, 8, 14)},
+		{"definition on the report package clause", "textDocument/definition", at(report, 1, 8), loc(report, 1, 8, 14)},
+		{"typeDefinition on a package clause", "textDocument/typeDefinition", at(uri, 0, 8), "error"},
+		{"implementation on a package clause", "textDocument/implementation", at(uri, 0, 8), "error"},
+		{"prepare on a package clause", "textDocument/prepareCallHierarchy", at(report, 1, 8), "error"},
+		{"references to an imported package", "textDocument/references", withContext(at(uri, 0, 8), false),
+			"[" + loc(report, 7, 1, 21) + "]"},
+		{"references to a package nobody imports", "textDocument/references", withContext(at(report, 1, 8), false), "[]"},
+		{"definition of Describe", "textDocument/definition", at(report, 11, 5), loc(report, 11, 5, 13)},
+		{"typeDefinition of Describe", "textDocument/typeDefinition", at(report, 11, 5), "[" + builtin(72, 5, 11) + "]"},
+		{"typeDefinition of Label", "textDocument/typeDefinition", at(report, 16, 5), "[" + builtin(72, 5, 11) + "]"},
+		{"implementation of Describe", "textDocument/implementation", at(report, 11, 5), "error"},
+		{"references of Label", "textDocument/references", withContext(at(report, 16, 5), false), "[]"},
+	}
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := p.call(10+i, tc.method, tc.params)
+			if tc.want == "error" {
+				if m.Error == nil || m.Error.Code != 0 {
+					t.Errorf("%s = %s (err %v), want an error response with code 0", tc.method, m.Result, m.Error)
+				}
+				return
+			}
+			if m.Error != nil || string(m.Result) != tc.want {
+				t.Errorf("%s = %s (err %v)\nwant %s", tc.method, m.Result, m.Error, tc.want)
+			}
+		})
+	}
+
+	hovers := []struct {
+		uri        string
+		line, char int
+		want       string
+	}{
+		{uri, 0, 8, "```go\npackage sample\n```\n\n---\n\n - Package path: example.com/sample\n - Module: example.com/sample\n - Language version: go1.26"},
+		{report, 1, 8, "```go\npackage report\n```\n\n---\n\nPackage report describes the sample's shapes.\n\n\n---\n\n" +
+			" - Package path: example.com/sample/report\n - Module: example.com/sample\n - Language version: go1.26"},
+		{report, 11, 5, "```go\nfunc Describe(r sample.Rect) string\n```\n\n---\n\nDescribe formats a rectangle's size.\n\n\n---\n\n" +
+			"[`report.Describe` on pkg.go.dev](https://pkg.go.dev/example.com/sample/report#Describe)"},
+		{report, 16, 5, "```go\nfunc Label(s string) string\n```\n\n---\n\nLabel upper-cases a label.\n\n\n---\n\n" +
+			"[`report.Label` on pkg.go.dev](https://pkg.go.dev/example.com/sample/report#Label)"},
+		{uri, 8, 18, "```go\nfield W float64 // size=8, offset=0\n```\n\n---\n\n" +
+			"[`(sample.Rect).W` on pkg.go.dev](https://pkg.go.dev/example.com/sample#Rect.W)"},
+		{report, 12, 31, "```go\nfield W float64\n```\n\n---\n\n" +
+			"[`(sample.Rect).W` on pkg.go.dev](https://pkg.go.dev/example.com/sample#Rect.W)"},
+		{uri, 8, 21, "```go\nfield H float64 // size=8, offset=8\n```\n\n---\n\n" +
+			"[`(sample.Rect).H` on pkg.go.dev](https://pkg.go.dev/example.com/sample#Rect.H)"},
+	}
+	for i, h := range hovers {
+		m := p.call(100+i, "textDocument/hover", at(h.uri, h.line, h.char))
+		var result struct {
+			Contents struct {
+				Value string `json:"value"`
+			} `json:"contents"`
+		}
+		if err := json.Unmarshal(m.Result, &result); err != nil || result.Contents.Value != h.want {
+			t.Errorf("hover at %s %d:%d = %q\nwant %q", h.uri, h.line, h.char, result.Contents.Value, h.want)
+		}
+	}
+
+	// Rect's fields are its children; both share the range of "W, H float64".
+	ds := p.call(200, "textDocument/documentSymbol", map[string]any{"textDocument": map[string]any{"uri": uri}})
+	if want := `{"children":[{"kind":8,"name":"W","range":` + rangeJSON(8, 18, 30) + `,"selectionRange":` + rangeJSON(8, 18, 19) + `},` +
+		`{"kind":8,"name":"H","range":` + rangeJSON(8, 18, 30) + `,"selectionRange":` + rangeJSON(8, 21, 22) + `}],` +
+		`"kind":23,"name":"Rect","range":` + rangeJSON(8, 5, 32) + `,"selectionRange":` + rangeJSON(8, 5, 9) + `}`; !strings.Contains(string(ds.Result), want) {
+		t.Errorf("documentSymbol = %s\nwant Rect as %s", ds.Result, want)
+	}
+	ds = p.call(201, "textDocument/documentSymbol", map[string]any{"textDocument": map[string]any{"uri": report}})
+	if want := `[{"kind":12,"name":"Describe","range":{"start":{"line":11,"character":0},"end":{"line":13,"character":1}},"selectionRange":` + rangeJSON(11, 5, 13) + `},` +
+		`{"kind":12,"name":"Label","range":` + rangeJSON(16, 0, 57) + `,"selectionRange":` + rangeJSON(16, 5, 10) + `}]`; string(ds.Result) != want {
+		t.Errorf("documentSymbol(report) = %s\nwant %s", ds.Result, want)
+	}
+
+	// Calls into the standard library point into $GOROOT.
+	m := p.call(300, "textDocument/prepareCallHierarchy", at(report, 11, 5))
+	var items []item
+	if err := json.Unmarshal(m.Result, &items); err != nil || len(items) != 1 {
+		t.Fatalf("prepare on Describe = %s", m.Result)
+	}
+	if !strings.Contains(string(m.Result), `"detail":"example.com/sample/report • report.go"`) {
+		t.Errorf("Describe item = %s, want the report package in its detail", m.Result)
+	}
+	out := p.call(301, "callHierarchy/outgoingCalls", map[string]any{"item": items[0]})
+	if want := `[{"fromRanges":[` + rangeJSON(12, 12, 19) + `],"to":{"name":"Sprintf","kind":12,"detail":"fmt • print.go",` +
+		`"uri":"file:///lspfake-goroot/src/fmt/print.go","range":` + rangeJSON(236, 5, 12) + `,"selectionRange":` + rangeJSON(236, 5, 12); !strings.HasPrefix(string(out.Result), want) {
+		t.Errorf("outgoingCalls of Describe = %s\nwant prefix %s", out.Result, want)
+	}
+	if in := p.call(302, "callHierarchy/incomingCalls", map[string]any{"item": items[0]}); string(in.Result) != "[]" {
+		t.Errorf("incomingCalls of Describe = %s, want []", in.Result)
 	}
 }

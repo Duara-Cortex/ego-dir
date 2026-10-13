@@ -18,17 +18,17 @@ type jsonGraph struct {
 }
 
 type jsonNode struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Qualified string    `json:"qualified,omitempty"`
-	Kind      string    `json:"kind"`
-	File      string    `json:"file"`
-	Range     jsonRange `json:"range"`
-	Hop       int       `json:"hop"`
-	Role      string    `json:"role"`
-	Signature string    `json:"signature,omitempty"`
-	Doc       string    `json:"doc,omitempty"`
-	Body      string    `json:"body,omitempty"`
+	ID        string     `json:"id"`
+	Name      string     `json:"name"`
+	Qualified string     `json:"qualified,omitempty"`
+	Kind      string     `json:"kind"`
+	File      string     `json:"file,omitempty"`
+	Range     *jsonRange `json:"range,omitempty"`
+	Hop       int        `json:"hop"`
+	Role      string     `json:"role"`
+	Signature string     `json:"signature,omitempty"`
+	Doc       string     `json:"doc,omitempty"`
+	Body      string     `json:"body,omitempty"`
 }
 
 type jsonRange struct {
@@ -47,7 +47,9 @@ type jsonEdge struct {
 
 // JSON writes g in the ego-dir/v1 schema: ids are "file:line:col" of the
 // symbol's name relative to root, and every node has a role (ego,
-// upstream, downstream, both or related).
+// upstream, downstream, both or related). A module has the id
+// "module:<path>", no range, and a file (its directory) only when it is
+// in the workspace.
 func JSON(w io.Writer, g *graph.EgoGraph, root string) error {
 	v := newView(g, root)
 	out := jsonGraph{
@@ -64,7 +66,7 @@ func JSON(w io.Writer, g *graph.EgoGraph, root string) error {
 			Qualified: n.Qualified,
 			Kind:      string(n.Kind),
 			File:      v.file(n),
-			Range:     jsonRange{n.Range.StartLine, n.Range.StartCol, n.Range.EndLine, n.Range.EndCol},
+			Range:     rangeOf(n),
 			Hop:       n.Hop,
 			Role:      v.role(n.ID),
 			Signature: n.Signature,
@@ -76,4 +78,12 @@ func JSON(w io.Writer, g *graph.EgoGraph, root string) error {
 		out.Edges = append(out.Edges, jsonEdge{From: v.id(e.From), To: v.id(e.To), Kind: string(e.Kind), Weight: e.Weight})
 	}
 	return encode(w, out)
+}
+
+// rangeOf is the node's declaration range, or nil without a position.
+func rangeOf(n graph.Node) *jsonRange {
+	if !n.Located() {
+		return nil
+	}
+	return &jsonRange{n.Range.StartLine, n.Range.StartCol, n.Range.EndLine, n.Range.EndCol}
 }

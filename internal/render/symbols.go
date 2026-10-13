@@ -88,14 +88,14 @@ func ReferencesJSON(w io.Writer, target graph.Node, refs []Reference, root strin
 }
 
 type jsonSymbol struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Qualified string    `json:"qualified,omitempty"`
-	Kind      string    `json:"kind"`
-	File      string    `json:"file"`
-	Range     jsonRange `json:"range"`
-	Signature string    `json:"signature,omitempty"`
-	Doc       string    `json:"doc,omitempty"`
+	ID        string     `json:"id"`
+	Name      string     `json:"name"`
+	Qualified string     `json:"qualified,omitempty"`
+	Kind      string     `json:"kind"`
+	File      string     `json:"file,omitempty"`
+	Range     *jsonRange `json:"range,omitempty"`
+	Signature string     `json:"signature,omitempty"`
+	Doc       string     `json:"doc,omitempty"`
 }
 
 func symbolView(n graph.Node, root string) *view {
@@ -105,7 +105,7 @@ func symbolView(n graph.Node, root string) *view {
 func (v *view) symbol(n graph.Node) jsonSymbol {
 	return jsonSymbol{
 		ID: v.id(n.ID), Name: n.Name, Qualified: n.Qualified, Kind: string(n.Kind), File: v.file(n),
-		Range:     jsonRange{n.Range.StartLine, n.Range.StartCol, n.Range.EndLine, n.Range.EndCol},
+		Range:     rangeOf(n),
 		Signature: n.Signature, Doc: n.Doc,
 	}
 }

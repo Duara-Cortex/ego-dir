@@ -9,12 +9,19 @@ import (
 	"strings"
 )
 
-// NodeID identifies a symbol: "<uri>#L<line>:<col>" of its name, 1-based.
+// NodeID identifies a node: "<uri>#L<line>:<col>" of a symbol's name,
+// 1-based, or "module:<path>" for a module.
 type NodeID string
 
 // NewNodeID returns the ID of the symbol whose name starts at sel.
 func NewNodeID(uri string, sel Range) NodeID {
 	return NodeID(fmt.Sprintf("%s#L%d:%d", uri, sel.StartLine, sel.StartCol))
+}
+
+// NewModuleID returns the ID of the module that importers name path. It
+// does not depend on where the module is stored.
+func NewModuleID(path string) NodeID {
+	return NodeID("module:" + path)
 }
 
 // Range is a span in a file. Lines and columns are 1-based (as in editors)
@@ -41,7 +48,9 @@ const (
 	KindOther     SymbolKind = "other"
 )
 
-// Node is one symbol in an ego-graph.
+// Node is one symbol in an ego-graph. A module node has no Range or
+// Selection; its URI is its directory when that is in the workspace, and
+// empty otherwise.
 type Node struct {
 	ID        NodeID
 	Name      string // e.g. "Build"
@@ -56,6 +65,10 @@ type Node struct {
 	Hop       int    // distance from the ego; 0 for the ego itself
 }
 
+// Located reports whether the node has a position in a file. Module nodes
+// do not.
+func (n Node) Located() bool { return n.Selection.StartLine > 0 }
+
 // EdgeKind is the relationship an edge represents.
 type EdgeKind string
 
@@ -65,10 +78,11 @@ const (
 	EdgeImplements   EdgeKind = "implements"
 	EdgeInstantiates EdgeKind = "instantiates"
 	EdgeImports      EdgeKind = "imports"
+	EdgeContains     EdgeKind = "contains"
 	EdgeReferences   EdgeKind = "references"
 )
 
-var edgeKinds = []EdgeKind{EdgeCalls, EdgeImplements, EdgeInstantiates, EdgeImports, EdgeReferences}
+var edgeKinds = []EdgeKind{EdgeCalls, EdgeImplements, EdgeInstantiates, EdgeImports, EdgeContains, EdgeReferences}
 
 // rank returns the kind's position in canonical order, or -1 if unknown.
 func (k EdgeKind) rank() int {
@@ -158,15 +172,19 @@ func (g *EgoGraph) AddEdge(e Edge) {
 	g.Edges = append(g.Edges, e)
 }
 
-// Sort puts nodes in (Hop, URI, line, column) order and edges in order of
-// their From node's location, then their To node's location, then Kind.
+// Sort puts nodes in (Hop, URI, line, column, ID) order and edges in order
+// of their From node's location, then their To node's location, then Kind.
+// The ID breaks ties between nodes without a location.
 func (g *EgoGraph) Sort() {
 	sort.SliceStable(g.Nodes, func(i, j int) bool {
 		a, b := g.Nodes[i], g.Nodes[j]
 		if a.Hop != b.Hop {
 			return a.Hop < b.Hop
 		}
-		return compareLocation(a, b) < 0
+		if c := compareLocation(a, b); c != 0 {
+			return c < 0
+		}
+		return a.ID < b.ID
 	})
 	byID := make(map[NodeID]Node, len(g.Nodes))
 	for _, n := range g.Nodes {

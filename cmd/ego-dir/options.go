@@ -12,8 +12,8 @@ import (
 	"github.com/Duara-Cortex/ego-dir/internal/lsp"
 )
 
-// defaultEdges leaves out references: with call hierarchy available they
-// duplicate calls.
+// defaultEdges leaves out references, which with call hierarchy available
+// duplicate calls, and contains, which lists a whole module or type.
 const defaultEdges = "calls,implements,instantiates,imports"
 
 // options is a validated command line.

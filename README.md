@@ -4,7 +4,9 @@ Ego-dir is a tool that combines LSP (Language Server Protocol) capabilities with
 
 Point it at a symbol position `(file, line, col)` and it returns a compact, deterministic
 Markdown (or JSON) report of that symbol, the **ego**, and its neighbours, the **alters**, up to
-`k` hops away. Alters are callers, callees, implementations and type dependencies.
+`k` hops away. Alters are callers, callees, implementations, type dependencies and,
+on request, members and parents. Pointed at a module's name (`package report`), it reports
+the module and the modules it imports.
 
 ## Features
 
@@ -74,6 +76,12 @@ ego-dir inspect_ego --file internal/graph/builder.go --line 42 --col 7 --depth 2
 # Only follow call edges, emit JSON
 ego-dir inspect_ego --file main.go --line 10 --col 6 --edges calls --format json
 
+# A package and the packages it imports (the cursor on its name in "package graph")
+ego-dir inspect_ego --file internal/graph/model.go --line 3 --col 9
+
+# What a type contains (fields, methods) and what contains it (its package)
+ego-dir inspect_ego --file shapes.go --line 9 --col 6 --edges contains
+
 # Single-purpose tools
 ego-dir resolve_definition --file main.go --line 10 --col 6
 ego-dir find_references    --file main.go --line 10 --col 6
@@ -86,7 +94,7 @@ ego-dir find_references    --file main.go --line 10 --col 6
 | `--col`       | (required) | **1-based** column in characters (runes). Converted to LSP UTF-16 internally.                                                       |
 | `--depth`     | `1`        | Hop radius `k` (1–5).                                                                                                               |
 | `--format`    | `md`       | `md` or `json` (all three commands).                                                                                                |
-| `--edges`     | see note   | Comma list of `calls,implements,instantiates,imports,references`, or `all`. Default: all except `references`.                       |
+| `--edges`     | see note   | Comma list of `calls,implements,instantiates,imports,contains,references`, or `all`. Default: all except `contains` and `references`. |
 | `--direction` | `both`     | `in` (callers/upstream), `out` (callees/downstream) or `both`.                                                                      |
 | `--body`      | `ego`      | Include bodies for `ego`, `all` or `none`.                                                                                          |
 | `--root`      | cwd        | Workspace root passed to the language server. Alters outside it (standard library, module cache, sibling directories) are left out. |

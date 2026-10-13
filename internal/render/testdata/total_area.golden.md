@@ -51,6 +51,10 @@ func TotalArea(shapes []Shape) float64 {
 
 _none_
 
+## Members
+
+_none_
+
 ## Type dependencies
 
 _none_
