@@ -24,6 +24,8 @@ var defaultKinds = []graph.EdgeKind{graph.EdgeCalls, graph.EdgeImplements, graph
 
 type fixture struct {
 	closeServer func()
+	server      *lspfake.Server
+	client      *lsp.Client
 	src         *lspsource.Source
 	root        string
 	uri         string
@@ -55,6 +57,8 @@ func setupWith(t *testing.T, customise func(s *lspfake.Server, uri string)) fixt
 	}
 	return fixture{
 		closeServer: func() { serverEnd.Close() },
+		server:      s,
+		client:      c,
 		src:         lspsource.New(c, root),
 		root:        root,
 		uri:         lsp.FileURI(filepath.Join(root, lspfake.SampleFile)),
@@ -63,12 +67,19 @@ func setupWith(t *testing.T, customise func(s *lspfake.Server, uri string)) fixt
 
 func (f fixture) build(t *testing.T, line, col int, opts graph.Options) *graph.EgoGraph {
 	t.Helper()
+	return f.buildIn(t, lspfake.SampleFile, line, col, opts)
+}
+
+// buildIn builds the graph of the symbol at line:col of the file rel
+// (relative to the root, with slashes).
+func (f fixture) buildIn(t *testing.T, rel string, line, col int, opts graph.Options) *graph.EgoGraph {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	// line/col are 1-based editor coordinates; the fixture is ASCII.
-	g, err := graph.Build(ctx, f.src, f.uri, line-1, col-1, opts)
+	g, err := graph.Build(ctx, f.src, f.fileURI(rel), line-1, col-1, opts)
 	if err != nil {
-		t.Fatalf("Build(%d:%d): %v", line, col, err)
+		t.Fatalf("Build(%s:%d:%d): %v", rel, line, col, err)
 	}
 	if err := g.Validate(); err != nil {
 		t.Fatalf("invalid graph: %v", err)
@@ -76,12 +87,19 @@ func (f fixture) build(t *testing.T, line, col int, opts graph.Options) *graph.E
 	return g
 }
 
+func (f fixture) fileURI(rel string) string {
+	return lsp.FileURI(filepath.Join(f.root, filepath.FromSlash(rel)))
+}
+
 // summary renders the graph as "name@line hop" nodes and
-// "name@line -kind-> name@line xN" edges.
+// "name@line -kind-> name@line xN" edges. A module is labelled by its ID.
 func summary(g *graph.EgoGraph) (nodes, edges []string) {
 	label := map[graph.NodeID]string{}
 	for _, n := range g.Nodes {
 		label[n.ID] = n.Name + "@" + itoa(n.Selection.StartLine)
+		if !n.Located() {
+			label[n.ID] = string(n.ID)
+		}
 		nodes = append(nodes, label[n.ID]+" hop"+itoa(n.Hop))
 	}
 	for _, e := range g.Edges {
@@ -384,7 +402,8 @@ func TestReferencesOfAType(t *testing.T) {
 	f := setup(t)
 	g := f.build(t, 9, 6, graph.Options{Depth: 1, Kinds: []graph.EdgeKind{graph.EdgeReferences}})
 	_, edges := summary(g)
-	want := []string{"Area@12 -references-> Rect@9 x1", "NewRect@15 -references-> Rect@9 x2"}
+	// Describe, in report/report.go, takes a sample.Rect.
+	want := []string{"Area@12 -references-> Rect@9 x1", "Describe@12 -references-> Rect@9 x1", "NewRect@15 -references-> Rect@9 x2"}
 	if !reflect.DeepEqual(edges, want) {
 		t.Errorf("edges = %v, want %v", edges, want)
 	}

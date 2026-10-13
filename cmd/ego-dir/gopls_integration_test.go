@@ -11,17 +11,26 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
+
+	"github.com/Duara-Cortex/ego-dir/internal/lsp/lspfake"
 )
 
-// realCLI runs the CLI with gopls on the sample workspace.
+// realCLI runs the CLI with gopls on shapes.go in the sample workspace.
 func realCLI(t *testing.T, args ...string) result {
+	t.Helper()
+	return realCLIFile(t, "shapes.go", args...)
+}
+
+// realCLIFile runs the CLI with gopls on file in the sample workspace.
+func realCLIFile(t *testing.T, file string, args ...string) result {
 	t.Helper()
 	gopls, err := exec.LookPath("gopls")
 	if err != nil {
 		t.Skip("gopls not on PATH")
 	}
-	full := append([]string{args[0], "--root", sampleRoot(t), "--file", "shapes.go", "--server", gopls}, args[1:]...)
+	full := append([]string{args[0], "--root", sampleRoot(t), "--file", file, "--server", gopls}, args[1:]...)
 	var stdout, stderr bytes.Buffer
 	code := run(full, &stdout, &stderr)
 	if code != 0 || stderr.Len() != 0 {
@@ -60,5 +69,30 @@ func TestGoplsJSONMatchesGolden(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("gopls JSON differs from the golden file\n--- got ---\n%s", r.stdout)
+	}
+}
+
+// TestGoplsModulesMatchFake requires gopls and the fake to give the same
+// output, byte for byte, for the report package and its imports.
+func TestGoplsModulesMatchFake(t *testing.T) {
+	runs := [][]string{
+		{"inspect_ego", "--line", "2", "--col", "9"},
+		{"inspect_ego", "--line", "2", "--col", "9", "--edges", "all", "--depth", "2", "--body", "all"},
+		{"inspect_ego", "--line", "2", "--col", "9", "--edges", "all", "--depth", "2", "--format", "json"},
+		{"inspect_ego", "--line", "12", "--col", "6", "--edges", "all", "--depth", "2"},
+		{"resolve_definition", "--line", "2", "--col", "9"},
+	}
+	for _, args := range runs {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			real := realCLIFile(t, lspfake.SampleReportFile, args...)
+			fakeArgs := append([]string{args[0]}, atFile(t, lspfake.SampleReportFile, args[2], args[4], args[5:]...)...)
+			fake := cli(t, fakeArgs...)
+			if fake.code != 0 {
+				t.Fatalf("fake: exit %d, stderr: %s", fake.code, fake.stderr)
+			}
+			if real.stdout != fake.stdout {
+				t.Errorf("gopls output differs from the fake's\n--- gopls ---\n%s\n--- fake ---\n%s", real.stdout, fake.stdout)
+			}
+		})
 	}
 }

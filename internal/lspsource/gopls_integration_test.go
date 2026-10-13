@@ -45,14 +45,19 @@ func goplsSource(t *testing.T) (*lspsource.Source, string) {
 // for every symbol in the sample, and requires them to be identical.
 func TestGoplsMatchesFake(t *testing.T) {
 	src, root := goplsSource(t)
-	uri := lsp.FileURI(filepath.Join(root, lspfake.SampleFile))
-	all := []graph.EdgeKind{graph.EdgeCalls, graph.EdgeImplements, graph.EdgeInstantiates, graph.EdgeImports, graph.EdgeReferences}
+	all := []graph.EdgeKind{graph.EdgeCalls, graph.EdgeImplements, graph.EdgeInstantiates, graph.EdgeImports,
+		graph.EdgeContains, graph.EdgeReferences}
+	shapes, report := lspfake.SampleFile, lspfake.SampleReportFile
 	egos := []struct {
 		name      string
+		file      string
 		line, col int // 1-based
 	}{
-		{"Shape", 4, 6}, {"Shape.Area", 5, 2}, {"Rect", 9, 6}, {"Rect.Area", 12, 15},
-		{"NewRect", 15, 6}, {"TotalArea", 18, 6}, {"Report", 27, 6}, {"TotalArea call site", 28, 9},
+		{"Shape", shapes, 4, 6}, {"Shape.Area", shapes, 5, 2}, {"Rect", shapes, 9, 6}, {"Rect.W", shapes, 9, 19},
+		{"Rect.H", shapes, 9, 22}, {"Rect.Area", shapes, 12, 15}, {"NewRect", shapes, 15, 6},
+		{"TotalArea", shapes, 18, 6}, {"Report", shapes, 27, 6}, {"TotalArea call site", shapes, 28, 9},
+		{"package sample", shapes, 1, 9}, {"package report", report, 2, 9},
+		{"Describe", report, 12, 6}, {"Label", report, 17, 6}, {"Rect use in report", report, 12, 24},
 	}
 	for _, ego := range egos {
 		for _, depth := range []int{1, 2} {
@@ -64,11 +69,12 @@ func TestGoplsMatchesFake(t *testing.T) {
 				t.Run(fmt.Sprintf("%s/depth%d/%s", ego.name, depth, d.name), func(t *testing.T) {
 					ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 					defer cancel()
+					uri := lsp.FileURI(filepath.Join(root, filepath.FromSlash(ego.file)))
 					real, err := graph.Build(ctx, src, uri, ego.line-1, ego.col-1, opts)
 					if err != nil {
 						t.Fatal(err)
 					}
-					fake := setup(t).build(t, ego.line, ego.col, opts)
+					fake := setup(t).buildIn(t, ego.file, ego.line, ego.col, opts)
 					if !reflect.DeepEqual(real.Nodes, fake.Nodes) {
 						t.Errorf("nodes differ\ngopls %+v\nfake  %+v", real.Nodes, fake.Nodes)
 					}
@@ -88,20 +94,29 @@ func TestGoplsMatchesFake(t *testing.T) {
 func TestGoplsGraphIsClean(t *testing.T) {
 	src, root := goplsSource(t)
 	uri := lsp.FileURI(filepath.Join(root, lspfake.SampleFile))
+	rootURI := lsp.FileURI(root)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	kinds := []graph.EdgeKind{graph.EdgeCalls, graph.EdgeImplements, graph.EdgeInstantiates, graph.EdgeImports}
-	for _, at := range []struct{ line, col int }{{18, 6}, {15, 6}, {9, 6}} { // TotalArea, NewRect, Rect
-		g, err := graph.Build(ctx, src, uri, at.line-1, at.col-1, graph.Options{Depth: 2, Kinds: kinds})
+	kinds := []graph.EdgeKind{graph.EdgeCalls, graph.EdgeImplements, graph.EdgeInstantiates, graph.EdgeImports, graph.EdgeContains}
+	for _, at := range []struct {
+		file      string
+		line, col int
+	}{
+		{lspfake.SampleFile, 18, 6}, {lspfake.SampleFile, 15, 6}, {lspfake.SampleFile, 9, 6}, // TotalArea, NewRect, Rect
+		{lspfake.SampleFile, 1, 9}, {lspfake.SampleReportFile, 2, 9}, // the packages
+	} {
+		fileURI := lsp.FileURI(filepath.Join(root, filepath.FromSlash(at.file)))
+		g, err := graph.Build(ctx, src, fileURI, at.line-1, at.col-1, graph.Options{Depth: 2, Kinds: kinds})
 		if err != nil {
 			t.Fatal(err)
 		}
 		for _, n := range g.Nodes {
-			if n.URI != uri {
+			// A module outside the workspace has no URI at all.
+			if n.URI != "" && n.URI != rootURI && !strings.HasPrefix(n.URI, rootURI+"/") {
 				t.Errorf("%s is outside the workspace: %s", n.Name, n.URI)
 			}
 			for _, s := range []string{n.Signature, n.Doc} {
-				for _, junk := range []string{"---", "size=", "pkg.go.dev", "```"} {
+				for _, junk := range []string{"---", "size=", "pkg.go.dev", "```", "Package path:", "Language version:"} {
 					if strings.Contains(s, junk) {
 						t.Errorf("%s: %q contains %q", n.Name, s, junk)
 					}

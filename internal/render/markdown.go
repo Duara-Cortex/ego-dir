@@ -31,6 +31,7 @@ func Markdown(w io.Writer, g *graph.EgoGraph, root string) error {
 	blocks = append(blocks, "## Downstream (callees)")
 	blocks = append(blocks, v.byHop(v.down)...)
 	blocks = append(blocks, "## Implementations", v.egoEdges(graph.EdgeImplements))
+	blocks = append(blocks, "## Members", v.members())
 	blocks = append(blocks, "## Type dependencies", v.egoEdges(graph.EdgeInstantiates, graph.EdgeImports))
 	blocks = append(blocks, "## Edges", v.edgeTable())
 
@@ -108,6 +109,31 @@ func (v *view) egoEdges(kinds ...graph.EdgeKind) string {
 	return strings.Join(items, "\n")
 }
 
+// members lists what contains the ego (marked "parent") and what the ego
+// contains, parents first.
+func (v *view) members() string {
+	var parents, children []string
+	for _, e := range v.g.Edges {
+		if e.Kind != graph.EdgeContains {
+			continue
+		}
+		switch v.g.Ego {
+		case e.To:
+			if n, ok := v.byID[e.From]; ok {
+				parents = append(parents, "- parent: "+strings.TrimPrefix(v.entry(n), "- "))
+			}
+		case e.From:
+			if n, ok := v.byID[e.To]; ok {
+				children = append(children, v.entry(n))
+			}
+		}
+	}
+	if len(parents)+len(children) == 0 {
+		return none
+	}
+	return strings.Join(append(parents, children...), "\n")
+}
+
 func (v *view) edgeTable() string {
 	if len(v.g.Edges) == 0 {
 		return none
@@ -126,6 +152,9 @@ func (v *view) label(id graph.NodeID) string {
 		return inlineCode(string(id))
 	}
 	name := strings.ReplaceAll(inlineCode(n.Name), "|", `\|`)
+	if !n.Located() {
+		return name + " " + strings.ReplaceAll(n.Qualified, "|", `\|`)
+	}
 	return name + " " + v.file(n) + ":" + strconv.Itoa(n.Selection.StartLine)
 }
 

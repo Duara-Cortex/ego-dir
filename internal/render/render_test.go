@@ -114,14 +114,14 @@ func TestEmptySectionsAreKept(t *testing.T) {
 	}
 	out := buf.String()
 	for _, h := range []string{"## Signature", "## Doc", "## Body", "## Upstream (callers)", "## Downstream (callees)",
-		"## Implementations", "## Type dependencies", "## Edges"} {
+		"## Implementations", "## Members", "## Type dependencies", "## Edges"} {
 		i := strings.Index(out, h+"\n\n")
 		if i < 0 {
 			t.Errorf("section %q missing", h)
 		}
 	}
-	if n := strings.Count(out, "_none_"); n != 5 {
-		t.Errorf("%d _none_ placeholders, want 5 (upstream, downstream, implementations, type dependencies, edges)", n)
+	if n := strings.Count(out, "_none_"); n != 6 {
+		t.Errorf("%d _none_ placeholders, want 6 (upstream, downstream, implementations, members, type dependencies, edges)", n)
 	}
 }
 

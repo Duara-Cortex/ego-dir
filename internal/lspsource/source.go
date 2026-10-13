@@ -7,12 +7,25 @@
 //     interface using the document outline.
 //   - instantiates: textDocument/typeDefinition of the symbol.
 //   - references: textDocument/references, grouped by enclosing symbol.
-//   - imports: not derived yet.
+//   - contains: the document outline, from a module to its top-level
+//     symbols and from a type to its members. Members a language declares
+//     outside their type (Go methods) are matched by the Language's Owner.
+//   - imports: from a module to the modules it imports, read by the
+//     Language (Go: go/parser), with weight = importing files.
+//
+// What differs between programming languages (outline names, hover
+// decorations, modules) comes from a Language, chosen by file extension.
+//
+// A module node has no position. The ego is a module when the position is
+// on the module's name in a file's module declaration ("package report").
+// Only contains (out) and imports (out) edges leave a module; no request
+// is sent to the server about one other than hover on that name.
 //
 // An error the server returns for a neighbour request (it does not support
 // it, or it does not apply to the symbol) counts as no neighbours.
 // Neighbours declared outside the workspace root (the standard library, the
-// module cache) are dropped: their paths depend on the machine.
+// module cache) are dropped: their paths depend on the machine. A module
+// outside the root is kept, identified by its path alone.
 package lspsource
 
 import (
@@ -21,7 +34,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 
@@ -92,15 +104,18 @@ func (s *Source) inWorkspace(uri string) bool {
 // file is a document read from disk and its outline.
 type file struct {
 	uri     string
+	path    string
+	lang    Language
 	lines   []string
 	symbols []symbol // flattened outline
 }
 
-// symbol is one outline entry with its parent's kind and name.
+// symbol is one outline entry with its parent's kind, name and name range.
 type symbol struct {
 	lsp.DocumentSymbol
 	parentKind lsp.SymbolKind
 	parentName string
+	parentSel  *lsp.Range // nil at the top level
 }
 
 // info is what the source remembers about a node it returned.
@@ -110,15 +125,25 @@ type info struct {
 	item     *lsp.CallHierarchyItem
 	prepared bool // call hierarchy was asked for item
 	abstract bool // an interface or interface method
+	module   *Module
+	lang     Language // the module's language
 }
 
 // Resolve returns the symbol at pos: the callee when pos is a call site,
 // otherwise the declaration that pos refers to.
 func (s *Source) Resolve(ctx context.Context, uri string, line, char int) (graph.Node, error) {
-	if _, err := s.load(ctx, uri); err != nil {
+	f, err := s.load(ctx, uri)
+	if err != nil {
 		return graph.Node{}, err
 	}
 	pos := lsp.Position{Line: line, Character: char}
+	if m, ok := f.moduleHeaderAt(pos); ok {
+		inf, err := s.moduleNode(ctx, m, f.lang)
+		if err != nil {
+			return graph.Node{}, err
+		}
+		return inf.node, nil
+	}
 	items, err := s.c.PrepareCallHierarchy(ctx, uri, pos)
 	if err := hardError(err); err != nil {
 		return graph.Node{}, err
@@ -146,11 +171,20 @@ func (s *Source) Neighbors(ctx context.Context, n graph.Node, dir graph.Directio
 	if inf == nil {
 		return nil, fmt.Errorf("unknown node %s", n.ID)
 	}
+	if inf.module != nil {
+		return s.moduleNeighbors(ctx, inf, dir, kinds)
+	}
 	var out []graph.Neighbor
 	for _, kind := range kinds {
 		var nbrs []graph.Neighbor
 		var err error
 		switch kind {
+		case graph.EdgeContains:
+			if dir == graph.DirIn {
+				nbrs, err = s.parent(ctx, inf)
+			} else {
+				nbrs, err = s.members(ctx, inf)
+			}
 		case graph.EdgeCalls:
 			nbrs, err = s.calls(ctx, inf, dir)
 		case graph.EdgeImplements:
@@ -353,7 +387,7 @@ func (s *Source) fromSymbol(ctx context.Context, f *file, sym symbol, item *lsp.
 	}
 	s.mu.Unlock()
 
-	name, qualified := splitName(sym.Name)
+	name, qualified := f.lang.SplitName(sym.Name)
 	if qualified == "" && sym.parentName != "" {
 		qualified = sym.parentName + "." + name
 	}
@@ -361,7 +395,7 @@ func (s *Source) fromSymbol(ctx context.Context, f *file, sym symbol, item *lsp.
 	if err := hardError(err); err != nil {
 		return nil, err
 	}
-	signature, doc := parseHover(hover)
+	signature, doc := f.lang.ParseHover(hover)
 	if signature == "" {
 		signature = declarationLine(f.text(sym.Range))
 	}
@@ -415,7 +449,7 @@ func (s *Source) load(ctx context.Context, uri string) (*file, error) {
 	if err := hardError(err); err != nil {
 		return nil, err
 	}
-	f = &file{uri: uri, lines: strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")}
+	f = &file{uri: uri, path: path, lang: languageOf(uri), lines: strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")}
 	f.flatten(outline, nil)
 
 	s.mu.Lock()
@@ -431,10 +465,12 @@ func (f *file) flatten(syms []lsp.DocumentSymbol, parent *lsp.DocumentSymbol) {
 	for _, sym := range syms {
 		entry := symbol{DocumentSymbol: sym}
 		entry.Children = nil
-		entry.Range.Start = f.withKeyword(entry.Range.Start)
+		entry.Range.Start = f.lang.DeclarationStart(f.line(entry.Range.Start.Line), entry.Range.Start)
 		if parent != nil {
 			entry.parentKind = parent.Kind
-			entry.parentName, _ = splitName(parent.Name)
+			entry.parentName, _ = f.lang.SplitName(parent.Name)
+			sel := parent.SelectionRange
+			entry.parentSel = &sel
 		}
 		f.symbols = append(f.symbols, entry)
 		f.flatten(sym.Children, &sym)
@@ -463,24 +499,6 @@ func (f *file) innermost(pos lsp.Position, span func(symbol) lsp.Range) *symbol 
 		}
 	}
 	return best
-}
-
-// withKeyword moves the start of a declaration back over a "type" keyword
-// that is alone before it on its line: gopls starts a type's range at its
-// name, so the body would otherwise read "Shape interface {...}".
-func (f *file) withKeyword(start lsp.Position) lsp.Position {
-	line := f.line(start.Line)
-	_, col := lsp.PositionToEditor(line, start)
-	runes := []rune(line)
-	if col-1 > len(runes) {
-		return start
-	}
-	before := string(runes[:col-1])
-	if strings.TrimSpace(before) != "type" {
-		return start
-	}
-	// Only ASCII precedes the name, so runes and UTF-16 units agree.
-	return lsp.Position{Line: start.Line, Character: strings.Index(before, "type")}
 }
 
 func contains(r lsp.Range, p lsp.Position) bool {
@@ -534,50 +552,6 @@ func hardError(err error) error {
 		return nil
 	}
 	return err
-}
-
-var receiverName = regexp.MustCompile(`^\(\*?([^()]+)\)\.(.+)$`)
-
-// splitName turns gopls-style method names "(T).M" or "(*T).M" into
-// "M" and the qualified "T.M".
-func splitName(name string) (short, qualified string) {
-	if m := receiverName.FindStringSubmatch(name); m != nil {
-		return m[2], m[1] + "." + m[2]
-	}
-	return name, ""
-}
-
-var (
-	linkOnly = regexp.MustCompile("^\\[[^\\]]*\\]\\([^)]*\\)$")
-	// laterCode is a fenced code block after the signature: gopls lists a
-	// type's method set there.
-	laterCode = regexp.MustCompile("(?s)```.*?```")
-	// layout is the memory layout gopls appends to a type or field, e.g.
-	// " // size=200 (0xc8), class=208 (0xd0)" or "..., offset=16 (0x10)".
-	layout = regexp.MustCompile(`(?m)[ \t]*// (?:(?:size|class|offset)=\d+ \(0x[0-9a-f]+\)(?:, |$))+$`)
-)
-
-// parseHover splits hover Markdown into the first code block (the
-// signature) and the remaining prose (the doc). It drops what gopls adds
-// around them: the memory layout comments in the signature, horizontal
-// rules, the method set code block, and the link to pkg.go.dev.
-func parseHover(md string) (signature, doc string) {
-	md = strings.TrimSpace(md)
-	if strings.HasPrefix(md, "```") {
-		body := md[strings.IndexByte(md+"\n", '\n')+1:]
-		if end := strings.Index(body, "```"); end >= 0 {
-			signature = strings.TrimSpace(layout.ReplaceAllString(body[:end], ""))
-			md = laterCode.ReplaceAllString(body[end+3:], "")
-		}
-	}
-	var paras []string
-	for _, p := range strings.Split(strings.TrimSpace(md), "\n\n") {
-		p = strings.TrimSpace(p)
-		if p != "" && p != "---" && !linkOnly.MatchString(p) {
-			paras = append(paras, p)
-		}
-	}
-	return signature, strings.Join(paras, "\n\n")
 }
 
 // declarationLine is the fallback signature: the first line of the

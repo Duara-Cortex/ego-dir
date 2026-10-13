@@ -23,7 +23,8 @@ const usage = `usage: ego-dir <command> [flags]
 
 Commands:
   inspect_ego         ego-graph of the symbol at a position: callers, callees,
-                      implementations and type dependencies up to --depth hops
+                      implementations and type dependencies up to --depth hops;
+                      on a module's name ("package x") the module and its imports
   resolve_definition  declaration of the symbol at a position
   find_references     uses of the symbol at a position
   version             print the version
@@ -40,8 +41,8 @@ Flags (all position commands):
 
 Flags (inspect_ego only):
   --depth N           hop radius, 1-5 (default: 1)
-  --edges LIST        comma list of calls,implements,instantiates,imports,references,
-                      or all (default: all except references)
+  --edges LIST        comma list of calls,implements,instantiates,imports,contains,
+                      references, or all (default: all except contains and references)
   --direction DIR     in, out or both (default: both)
   --body MODE         bodies to include: ego, all or none (default: ego)
 

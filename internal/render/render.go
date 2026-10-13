@@ -100,8 +100,12 @@ func (v *view) role(id graph.NodeID) string {
 	}
 }
 
-// file returns the node's file relative to the root, with / separators.
+// file returns the node's file (a module's directory) relative to the
+// root, with / separators; "" when it has none.
 func (v *view) file(n graph.Node) string {
+	if n.URI == "" {
+		return ""
+	}
 	p, err := lsp.URIToPath(n.URI)
 	if err != nil {
 		return n.URI
@@ -114,8 +118,12 @@ func (v *view) file(n graph.Node) string {
 	return filepath.ToSlash(p)
 }
 
-// location is "file:line" or "file:start-end" for the whole declaration.
+// location is "file:line" or "file:start-end" for the whole declaration,
+// and the qualified name (a module's path) for a node without a position.
 func (v *view) location(n graph.Node) string {
+	if !n.Located() {
+		return n.Qualified
+	}
 	loc := v.file(n) + ":" + strconv.Itoa(n.Range.StartLine)
 	if n.Range.EndLine > n.Range.StartLine {
 		loc += "-" + strconv.Itoa(n.Range.EndLine)
@@ -123,10 +131,11 @@ func (v *view) location(n graph.Node) string {
 	return loc
 }
 
-// id is the node's stable, root-relative id: "file:line:col" of its name.
+// id is the node's stable, root-relative id: "file:line:col" of its name,
+// or the graph ID ("module:<path>") of a node without a position.
 func (v *view) id(id graph.NodeID) string {
 	n, ok := v.byID[id]
-	if !ok {
+	if !ok || !n.Located() {
 		return string(id)
 	}
 	return v.file(n) + ":" + strconv.Itoa(n.Selection.StartLine) + ":" + strconv.Itoa(n.Selection.StartCol)

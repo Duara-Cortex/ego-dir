@@ -142,7 +142,7 @@ func edgeSet(src *fakeSource, g *graph.EgoGraph) []string {
 	return out
 }
 
-var allKinds = []graph.EdgeKind{graph.EdgeCalls, graph.EdgeImplements, graph.EdgeInstantiates, graph.EdgeImports, graph.EdgeReferences}
+var allKinds = []graph.EdgeKind{graph.EdgeCalls, graph.EdgeImplements, graph.EdgeInstantiates, graph.EdgeImports, graph.EdgeContains, graph.EdgeReferences}
 
 // chain: X -> R -> T -> A -> B, with T the ego.
 func chain() *fakeSource {
@@ -428,5 +428,26 @@ func TestBuildDerivesMissingIDs(t *testing.T) {
 	}
 	if g.Ego != n.ID || len(g.Nodes) != 3 {
 		t.Errorf("Ego = %q with %d nodes, want %q with 3", g.Ego, len(g.Nodes), n.ID)
+	}
+}
+
+func TestContainsFollowsTheSearchDirection(t *testing.T) {
+	// Module M contains type T, which contains fields F and G. From F,
+	// upstream is T then M; G is a sibling, on neither side.
+	has := func(from, to string) fakeEdge { return fakeEdge{from, to, graph.EdgeContains, 1} }
+	src := newSource(has("M", "T"), has("T", "F"), has("T", "G"))
+	g := build(t, src, "F", graph.Options{Depth: 2, Kinds: []graph.EdgeKind{graph.EdgeContains}})
+	if want := map[string]int{"F": 0, "T": 1, "M": 2}; !reflect.DeepEqual(hops(src, g), want) {
+		t.Errorf("hops = %v, want %v (no siblings)", hops(src, g), want)
+	}
+	// From M, downstream is everything it contains, level by level.
+	g = build(t, src, "M", graph.Options{Depth: 2, Kinds: []graph.EdgeKind{graph.EdgeContains}})
+	if want := map[string]int{"M": 0, "T": 1, "F": 2, "G": 2}; !reflect.DeepEqual(hops(src, g), want) {
+		t.Errorf("hops = %v, want %v", hops(src, g), want)
+	}
+	// Not selected, not followed.
+	g = build(t, src, "F", graph.Options{Depth: 2, Kinds: []graph.EdgeKind{graph.EdgeCalls}})
+	if want := map[string]int{"F": 0}; !reflect.DeepEqual(hops(src, g), want) {
+		t.Errorf("hops = %v, want only the ego", hops(src, g))
 	}
 }
