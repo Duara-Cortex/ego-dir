@@ -27,6 +27,8 @@ Commands:
                       on a module's name ("package x") the module and its imports
   resolve_definition  declaration of the symbol at a position
   find_references     uses of the symbol at a position
+  mcp                 serve the three commands above as Model Context Protocol
+                      tools on stdin/stdout, until stdin closes
   version             print the version
   help                print this help
 
@@ -45,6 +47,12 @@ Flags (inspect_ego only):
                       references, or all (default: all except contains and references)
   --direction DIR     in, out or both (default: both)
   --body MODE         bodies to include: ego, all or none (default: ego)
+
+Flags (mcp), fixed for the server's lifetime:
+  --root DIR          workspace root; tool calls cannot read outside it
+                      (default: current directory)
+  --server "CMD ARGS" language server command (default: chosen by file extension)
+  --timeout DURATION  deadline for each tool call (default: 30s)
 
 Exit codes: 0 success, 1 usage error, 2 language server or runtime error.
 `
@@ -66,6 +74,11 @@ func usagef(format string, args ...any) error {
 // run is the testable entry point. Results go to stdout only on success;
 // errors go to stderr. It returns the process exit code.
 func run(args []string, stdout, stderr io.Writer) int {
+	return runWithInput(args, os.Stdin, stdout, stderr)
+}
+
+// runWithInput is run with stdin, which only the mcp command reads.
+func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprint(stderr, usage)
 		return exitUsage
@@ -85,6 +98,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return exitOK
 	case "inspect_ego", "resolve_definition", "find_references":
 		err = runCommand(cmd, rest, stdout)
+	case "mcp":
+		err = runMCP(rest, stdin, stdout, stderr)
 	default:
 		err = usagef("unknown command %q", cmd)
 	}

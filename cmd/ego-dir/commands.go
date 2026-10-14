@@ -14,14 +14,24 @@ import (
 	"github.com/Duara-Cortex/ego-dir/internal/render"
 )
 
-// runCommand runs a position command against a freshly started language
-// server. Output is rendered into a buffer and written only on success.
-func runCommand(cmd string, args []string, stdout io.Writer) (err error) {
-	o, err := parseOptions(cmd, args)
+// runCommand runs a position command given on the command line.
+func runCommand(cmd string, args []string, stdout io.Writer) error {
+	r, err := parseFlags(cmd, args)
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), o.timeout)
+	o, err := r.validate()
+	if err != nil {
+		return err
+	}
+	return execute(context.Background(), cmd, o, stdout)
+}
+
+// execute runs a validated position command against a freshly started
+// language server, within o.timeout of ctx. Output is rendered into a
+// buffer and written only on success.
+func execute(ctx context.Context, cmd string, o *options, stdout io.Writer) (err error) {
+	ctx, cancel := context.WithTimeout(ctx, o.timeout)
 	defer cancel()
 
 	client, err := lsp.Start(ctx, o.server, o.root)

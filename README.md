@@ -105,13 +105,63 @@ Results go to stdout. Diagnostics go to stderr. The exit code is `0` on success,
 usage error (bad flags, missing file, position outside the file) and `2` on an LSP or runtime
 error.
 
+## Use with an agent
+
+`ego-dir mcp` serves the three commands as [Model Context Protocol](https://modelcontextprotocol.io)
+tools over stdio, so an agent can call them directly instead of running shell commands:
+
+```sh
+ego-dir mcp [--root DIR] [--server "CMD ARGS"] [--timeout DURATION]
+```
+
+Register it with Claude Code (once per repository). Use absolute paths for both the binary
+and `--root`: Claude Code starts the server with its own environment, which may not have
+`~/.local/bin` on its PATH.
+
+```sh
+claude mcp add ego-dir -- /path/to/ego-dir mcp --root /path/to/repo
+```
+
+Then run `/mcp` in Claude Code: `ego-dir` should be listed as connected, with the tools
+`inspect_ego`, `resolve_definition` and `find_references`. Ask something like "use inspect_ego
+to show what calls `TotalArea` in shapes.go", and the agent calls the tool. The result is
+the same Markdown (or JSON) the CLI prints.
+
+| Tool                 | Arguments                                                                  |
+|----------------------|----------------------------------------------------------------------------|
+| `inspect_ego`        | `file`, `line`, `col` (required); `format`, `depth`, `edges`, `direction`, `body` |
+| `resolve_definition` | `file`, `line`, `col` (required); `format`                                  |
+| `find_references`    | `file`, `line`, `col` (required); `format`                                  |
+
+The arguments mean what the flags of the same name mean. `file` is relative to the root.
+
+- **Fixed configuration.** `--root`, `--server` and `--timeout` are set when the server
+  starts. A tool call cannot change them: an argument the schema does not list is an error.
+- **Confined to the root.** A `file` that resolves outside `--root`, whether by `..`, an
+  absolute path or a symbolic link, is refused.
+- **Read-only.** Every tool only asks the language server questions, and says so
+  (`readOnlyHint`).
+- **Errors the agent can read.** A bad argument or a failed lookup is a tool result marked
+  `isError`, with the same message the CLI prints, so the agent can correct itself.
+- Each call starts its own language server and stops it afterwards, within `--timeout`
+  (counted from when the call starts running). Up to four calls run at once; more wait their
+  turn. A call the client cancels is stopped.
+- Only the `file` argument is confined. A position on a use site resolves to the declaration
+  it refers to, which may be outside the root (the standard library, for example), and is
+  then reported like any other ego.
+- Protocol messages go to stdout, one JSON object per line; diagnostics go to stderr. The
+  server exits with `0` when stdin closes.
+- It speaks MCP `2026-07-28` (`server/discover`, the version in each request's `_meta`) and,
+  for clients that start with `initialize`, `2025-11-25`, `2025-06-18` and `2024-11-05`.
+
 ## Architecture
 
-There are three decoupled layers. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for
-diagrams, data structures and the edge derivation table.
+There are three decoupled layers, with an MCP server in front of the agent interface. See
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for diagrams, data structures and the edge derivation table.
 
 ```
-cmd/ego-dir         Agent interface (CLI, flags, exit codes)
+cmd/ego-dir         Agent interface (CLI, flags, exit codes, MCP tools)
+internal/mcp        Model Context Protocol server (JSON-RPC 2.0 over stdio)
 internal/graph      Ego-graph engine (Node, Edge, EgoGraph, BFS Builder)
 internal/render     Markdown + JSON renderers (deterministic)
 internal/lsp        LSP harness (JSON-RPC 2.0 framing, client, server registry)
