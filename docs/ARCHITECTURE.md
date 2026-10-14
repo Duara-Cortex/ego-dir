@@ -5,10 +5,22 @@
 ```mermaid
 flowchart TB
     Agent["AI agent / human"] -->|"argv: inspect_ego --file --line --col --depth --format"| CLI
+    Agent -->|"MCP tools/call over stdio"| MCP
+
+    subgraph Protocol["MCP server · internal/mcp"]
+        MCP["JSON-RPC 2.0, one message per line;<br/>initialize, ping, tools/list, tools/call,<br/>cancellation, bounded concurrency"]
+    end
 
     subgraph Interface["Agent interface · cmd/ego-dir"]
-        CLI["flag parsing, validation,<br/>1-based to LSP position conversion"]
+        CLI["flag parsing"]
+        Tools["tool arguments,<br/>confined to --root"]
+        Validate["validate a request,<br/>1-based to LSP position conversion"]
+        Execute["execute: start a server,<br/>build, render"]
+        CLI --> Validate
+        Tools --> Validate
+        Validate --> Execute
     end
+    MCP --> Tools
 
     subgraph Engine["Ego-graph engine · internal/graph"]
         Builder["Builder (BFS, depth k,<br/>edge filter, dedupe)"]
@@ -28,10 +40,10 @@ flowchart TB
         Registry --> Client --> Conn
     end
 
-    CLI --> Builder
+    Execute --> Builder
     Builder -->|"SymbolSource interface"| Client
     Model --> MD & JSON
-    MD & JSON -->|stdout| Agent
+    MD & JSON -->|"stdout, or a tool result"| Agent
     Conn <-->|"stdio pipes"| LS["Language server process<br/>gopls, pyright, rust-analyzer, tsserver"]
 ```
 
@@ -53,6 +65,97 @@ the `Language` interface, chosen by file extension:
 A language is a struct composed of one implementation of each part, so a new language
 reuses the generic parts that fit (an object-oriented language nests members in the
 outline, as the generic `Naming` expects) and supplies only what differs.
+
+## MCP server
+
+`ego-dir mcp` serves the position commands as tools. `internal/mcp` speaks the protocol and
+knows nothing about the tools: it is given a fixed list of tools, each a name, a description,
+a JSON Schema and a handler. `cmd/ego-dir` supplies the tools. A tool call's arguments become
+the same `request` that flags become, and go through the same `validate` and `execute` as
+the CLI, so a tool's text is byte for byte what the CLI prints.
+
+- **Framing.** JSON-RPC 2.0, one JSON object per line on stdin and stdout. Blank lines are
+  skipped. Batches (JSON arrays) are refused with `InvalidRequest`. Nothing else is written
+  to stdout; diagnostics go to stderr.
+- **Two eras.** The server speaks both. The era belongs to each request, not to the
+  connection:
+  - A **modern** request (`2026-07-28`, `mcp.ModernVersions`) names its protocol version in
+    `_meta` (`io.modelcontextprotocol/protocolVersion`, with
+    `io.modelcontextprotocol/clientCapabilities`) and needs no handshake. `server/discover`
+    lists the supported versions and capabilities. An unknown version gets
+    `UnsupportedProtocolVersion` (`-32022`) listing the supported ones; a missing field gets
+    `InvalidParams`. Results carry `resultType: "complete"` and the server's name and version
+    in `_meta`; `tools/list` and `server/discover` also carry `ttlMs` and `cacheScope:
+    "public"`. There is no `ping`.
+  - A **legacy** request (`2025-11-25`, `2025-06-18`, `2024-11-05`, `mcp.LegacyVersions`)
+    has no version in `_meta` and follows `initialize`, which echoes the client's
+    `protocolVersion` if it is a legacy one and otherwise answers with the latest. Legacy
+    results keep their old shape. `2025-03-26` is left out: it requires servers to accept
+    batches.
+  - A client that speaks both probes with `server/discover`. A modern request gets a
+    discovery result; a probe without `_meta` gets an error, and the client falls back to
+    `initialize`.
+- **Capabilities.** `{"tools": {}}`; the tool list never changes, so there is no
+  `listChanged` and no `subscriptions/listen`.
+- **Errors.** A JSON-RPC error is only for a protocol fault: unparseable JSON (`ParseError`),
+  an unknown method (`MethodNotFound`), an unknown tool or missing name (`InvalidParams`).
+  Anything that goes wrong inside a tool, including bad arguments, is a result with
+  `isError: true` and the message as text, which the model can read and act on.
+- **Configuration is fixed.** `--root`, `--server` and `--timeout` are read once. Tool
+  arguments are decoded strictly, so an argument the schema does not list (such as `root`)
+  is an error rather than ignored.
+- **Confinement.** Every tool call sets `confine` on its request: `validate` refuses a file
+  whose path, compared by name and again with symbolic links followed, is outside the root.
+  The CLI does not set it.
+- **Concurrency.** Each `tools/call` runs in its own goroutine, with its own language server,
+  so pings and cancellations are read while it runs. At most `MaxConcurrent` (default 4)
+  run at once; the rest wait for a slot. Calls share nothing (each is a fresh server, read
+  only), so running them side by side is safe, and serialising them would make one slow call
+  hold up every other; the bound keeps a burst of calls from starting a burst of servers.
+- **Cancellation.** `notifications/cancelled` cancels the call's context, which stops its
+  language server; a cancelled call gets no reply. A call waiting for a slot gives up too.
+  When stdin closes, every running call is cancelled, the server waits for them to stop
+  their language servers, and exits with `0`.
+
+Starting a server per call keeps calls independent but costs a server start each time. A
+warm server shared between calls would sit behind `execute`, which is the only place a
+server is started; the protocol layer would not change.
+
+```mermaid
+sequenceDiagram
+    participant A as Agent (MCP client)
+    participant M as internal/mcp
+    participant T as Tool handler (cmd/ego-dir)
+    participant S as Language server
+
+    alt modern (2026-07-28)
+        A->>M: server/discover {_meta: protocolVersion, clientCapabilities}
+        M-->>A: {supportedVersions, capabilities: {tools}, ttlMs, cacheScope}
+    else legacy (2025-11-25 and earlier)
+        A->>M: initialize {protocolVersion}
+        M-->>A: {protocolVersion, capabilities: {tools}, serverInfo}
+        A->>M: notifications/initialized
+    end
+    A->>M: tools/list
+    M-->>A: inspect_ego, resolve_definition, find_references
+    A->>M: tools/call inspect_ego {file, line, col, depth}
+    M->>M: wait for a free slot
+    M->>T: handler(ctx, arguments)
+    T->>T: decode strictly, validate (confined to --root)
+    T->>S: start, initialise, build the ego-graph, shutdown
+    S-->>T: answers
+    T-->>M: rendered Markdown or JSON
+    M-->>A: {content: [{type: text, text}], isError: false}
+    opt the agent cancels
+        A->>M: notifications/cancelled {requestId}
+        M->>T: cancel ctx
+        T->>S: kill
+        Note over M,A: no reply for the cancelled call
+    end
+    A--xM: stdin closes
+    M->>T: cancel running calls, wait
+    M-->>A: exit 0
+```
 
 ## Request flow for `inspect_ego`
 
@@ -243,6 +346,9 @@ shows `file:line`. In JSON, every node has a
 | 1    | Usage error, detected before a server starts: flags, missing file, unknown extension, position outside the file. |
 | 2    | Runtime error: the server cannot start, a request fails, or no symbol is at the position. |
 
+`ego-dir mcp` exits with `1` for bad flags, `0` when stdin closes and `2` if stdin or stdout
+fails. Errors in tool calls never end it.
+
 ## Test strategy
 
 | Layer        | Technique                                                                            |
@@ -252,6 +358,8 @@ shows `file:line`. In JSON, every node has a
 | Graph        | Fake `SymbolSource` graph: depth limits, cycles, filters, dedupe, ordering            |
 | Render       | Golden files, plus "render twice and compare bytes"                                    |
 | CLI          | `run(args, stdout, stderr) int` tested in-process: flags, validation, exit codes      |
+| MCP protocol | Scripted client over `io.Pipe`: both eras (discover, `_meta` versions, handshake), framing, errors, notifications, cancellation, the concurrency bound, EOF |
+| MCP tools    | `ego-dir mcp` in-process against the fake server: tool text equals the CLI's output and the golden file; confinement; errors as `isError` |
 | Integration  | `//go:build integration`, real `gopls` on `testdata/sample`, skipped when gopls is missing |
 
 ### Pending acceptance tests

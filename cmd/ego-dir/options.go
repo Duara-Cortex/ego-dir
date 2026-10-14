@@ -1,8 +1,10 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,7 +18,7 @@ import (
 // duplicate calls, and contains, which lists a whole module or type.
 const defaultEdges = "calls,implements,instantiates,imports"
 
-// options is a validated command line.
+// options is a validated request.
 type options struct {
 	root    string   // absolute workspace root
 	path    string   // absolute source file
@@ -28,85 +30,153 @@ type options struct {
 	build   graph.Options // inspect_ego only
 }
 
-// parseOptions parses and validates flags for cmd. It reads the file to
-// check the position, so every input error is reported before a language
-// server is started. All errors are usage errors.
-func parseOptions(cmd string, args []string) (*options, error) {
+// request is a position command's input before validation, from flags or
+// from an MCP tool call.
+type request struct {
+	cmd     string
+	file    string
+	line    int
+	col     int
+	root    string
+	server  string
+	format  string
+	timeout time.Duration
+	// inspect_ego only
+	depth     int
+	edges     string
+	direction string
+	body      string
+	// confine requires file to resolve inside root, symbolic links
+	// included. The MCP server sets it; the CLI trusts its user.
+	confine bool
+}
+
+// newRequest returns a request for cmd holding every default.
+func newRequest(cmd string) request {
+	return request{cmd: cmd, format: "md", timeout: 30 * time.Second,
+		depth: 1, edges: defaultEdges, direction: "both", body: "ego"}
+}
+
+// parseFlags parses the flags of cmd into a request. All errors are usage
+// errors.
+func parseFlags(cmd string, args []string) (request, error) {
+	r := newRequest(cmd)
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	fs.SetOutput(io.Discard) // errors are reported by run
-	file := fs.String("file", "", "")
-	line := fs.Int("line", 0, "")
-	col := fs.Int("col", 0, "")
-	root := fs.String("root", "", "")
-	server := fs.String("server", "", "")
-	format := fs.String("format", "md", "")
-	timeout := fs.Duration("timeout", 30*time.Second, "")
-	var depth *int
-	var edges, direction, body *string
+	fs.StringVar(&r.file, "file", "", "")
+	fs.IntVar(&r.line, "line", 0, "")
+	fs.IntVar(&r.col, "col", 0, "")
+	fs.StringVar(&r.root, "root", "", "")
+	fs.StringVar(&r.server, "server", "", "")
+	fs.StringVar(&r.format, "format", r.format, "")
+	fs.DurationVar(&r.timeout, "timeout", r.timeout, "")
 	if cmd == "inspect_ego" {
-		depth = fs.Int("depth", 1, "")
-		edges = fs.String("edges", defaultEdges, "")
-		direction = fs.String("direction", "both", "")
-		body = fs.String("body", "ego", "")
+		fs.IntVar(&r.depth, "depth", r.depth, "")
+		fs.StringVar(&r.edges, "edges", r.edges, "")
+		fs.StringVar(&r.direction, "direction", r.direction, "")
+		fs.StringVar(&r.body, "body", r.body, "")
 	}
 	if err := fs.Parse(args); err != nil {
-		return nil, usageError{err}
+		return request{}, usageError{err}
 	}
 	if fs.NArg() > 0 {
-		return nil, usagef("unexpected argument %q", fs.Arg(0))
+		return request{}, usagef("unexpected argument %q", fs.Arg(0))
 	}
 	set := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
 	for _, required := range []string{"file", "line", "col"} {
 		if !set[required] {
-			return nil, usagef("--%s is required", required)
+			return request{}, usagef("--%s is required", required)
 		}
 	}
+	return r, nil
+}
 
-	o := &options{timeout: *timeout}
-	switch *format {
+// validate checks r and resolves it into options. It reads the file to
+// check the position, so every input error is reported before a language
+// server is started. All errors are usage errors.
+func (r request) validate() (*options, error) {
+	o := &options{timeout: r.timeout}
+	switch r.format {
 	case "md":
 	case "json":
 		o.json = true
 	default:
-		return nil, usagef("--format must be md or json, not %q", *format)
+		return nil, usagef("--format must be md or json, not %q", r.format)
 	}
 	if o.timeout <= 0 {
 		return nil, usagef("--timeout must be positive")
 	}
 
 	var err error
-	if o.root, err = absRoot(*root); err != nil {
+	if o.root, err = absRoot(r.root); err != nil {
 		return nil, err
 	}
-	o.path = *file
+	o.path = r.file
 	if !filepath.IsAbs(o.path) {
 		o.path = filepath.Join(o.root, o.path)
+	}
+	if r.confine {
+		if err := insideRoot(o.root, o.path, r.file); err != nil {
+			return nil, err
+		}
 	}
 	src, err := os.ReadFile(o.path)
 	if err != nil {
 		return nil, usageError{err}
 	}
 	o.lines = strings.Split(strings.ReplaceAll(string(src), "\r\n", "\n"), "\n")
-	if *line < 1 || *line > len(o.lines) {
-		return nil, usagef("--line %d is outside %s (1-%d)", *line, *file, len(o.lines))
+	if r.line < 1 || r.line > len(o.lines) {
+		return nil, usagef("--line %d is outside %s (1-%d)", r.line, r.file, len(o.lines))
 	}
-	if o.pos, err = lsp.EditorToPosition(o.lines[*line-1], *line, *col); err != nil {
+	if o.pos, err = lsp.EditorToPosition(o.lines[r.line-1], r.line, r.col); err != nil {
 		return nil, usageError{err}
 	}
 
-	if *server != "" {
-		o.server = strings.Fields(*server)
+	if r.server != "" {
+		o.server = strings.Fields(r.server)
 	} else if o.server, err = lsp.ServerCommand(o.path); err != nil {
 		return nil, usageError{err}
 	}
 
-	if cmd == "inspect_ego" {
-		if o.build, err = buildOptions(*depth, *edges, *direction, *body); err != nil {
+	if r.cmd == "inspect_ego" {
+		if o.build, err = buildOptions(r.depth, r.edges, r.direction, r.body); err != nil {
 			return nil, err
 		}
 	}
 	return o, nil
+}
+
+// insideRoot reports a usage error unless path, with every symbolic link
+// followed, is inside root. file is the path as given, for messages, which
+// never name anything outside root.
+func insideRoot(root, path, file string) error {
+	outside := usagef("%s is outside the root", file)
+	realRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return usagef("cannot resolve the root")
+	}
+	// By name first, so nothing outside the root is looked at. The root
+	// may be written either way: /var/x or /private/var/x on macOS.
+	if !within(root, path) && !within(realRoot, path) {
+		return outside
+	}
+	realPath, err := filepath.EvalSymlinks(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return usagef("%s does not exist", file)
+	} else if err != nil {
+		return usagef("cannot resolve %s", file)
+	}
+	if !within(realRoot, realPath) {
+		return outside
+	}
+	return nil
+}
+
+// within reports whether path is root or below it, comparing names only.
+func within(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	return err == nil && !filepath.IsAbs(rel) && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func absRoot(root string) (string, error) {
