@@ -494,7 +494,12 @@ func TestEditOnDiskIsSentToTheServer(t *testing.T) {
 	if len(f.started()) != 1 || len(changes) != 1 {
 		t.Fatalf("%d servers, %d didChangeWatchedFiles; want the edit sent to the one server", len(f.started()), len(changes))
 	}
-	if want := `{"changes":[{"uri":"` + report + `","type":2}]}`; string(changes[0].Params) != want {
+	want := `{"changes":[{"uri":"` + report + `","type":2}`
+	if real, err := filepath.EvalSymlinks(root); err == nil && real != root {
+		// Named again under the resolved root (a macOS temporary directory).
+		want += `,{"uri":"` + lsp.FileURI(filepath.Join(real, lspfake.SampleReportFile)) + `","type":2}`
+	}
+	if want += `]}`; string(changes[0].Params) != want {
 		t.Errorf("didChangeWatchedFiles = %s, want %s", changes[0].Params, want)
 	}
 }
@@ -740,5 +745,33 @@ func TestEditToADocumentAnotherCallHoldsIsSeen(t *testing.T) {
 	defer b.Release(ctx5(t), nil)
 	if got := callers(t, b, shapes); !reflect.DeepEqual(got, []string{"Report", "Summary"}) {
 		t.Errorf("callers = %v, want [Report Summary]: the open copy hid the edit", got)
+	}
+}
+
+// Through a symbolic link to the root, each change is sent by both names.
+func TestChangesUnderASymlinkedRootAreSentByBothNames(t *testing.T) {
+	real, _, _ := sample(t)
+	real, err := filepath.EvalSymlinks(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skip("cannot make a symbolic link:", err)
+	}
+	f := &fakes{watch: true}
+	p := newPool(t, f, lsppool.Options{})
+	acquire(t, p, gopls, link).Release(ctx5(t), nil)
+	appendSummary(t, link)
+	acquire(t, p, gopls, link).Release(ctx5(t), nil)
+	changes := f.started()[0].await("workspace/didChangeWatchedFiles", 1, nil)
+	if changes != 1 {
+		t.Fatalf("%d didChangeWatchedFiles, want 1", changes)
+	}
+	viaLink := lsp.FileURI(filepath.Join(link, lspfake.SampleReportFile))
+	viaReal := lsp.FileURI(filepath.Join(real, lspfake.SampleReportFile))
+	want := `{"changes":[{"uri":"` + viaLink + `","type":2},{"uri":"` + viaReal + `","type":2}]}`
+	if got := string(f.started()[0].Requests("workspace/didChangeWatchedFiles")[0].Params); got != want {
+		t.Errorf("didChangeWatchedFiles = %s, want %s", got, want)
 	}
 }

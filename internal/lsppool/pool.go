@@ -34,6 +34,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -113,6 +114,7 @@ type entry struct {
 
 	scanMu sync.Mutex
 	snap   *snapshot // the files under root as the server last learnt of them
+	real   string    // root with symbolic links resolved, when that differs
 
 	docMu sync.Mutex
 	docs  map[string]*document // open documents by URI
@@ -258,6 +260,9 @@ func (p *Pool) join(ctx context.Context, command []string, root string) (*entry,
 // root are recorded first, so no later change is missed.
 func (p *Pool) start(e *entry) {
 	e.snap, _ = scan(e.root, nil)
+	if real, err := filepath.EvalSymlinks(e.root); err == nil && real != e.root {
+		e.real = real
+	}
 	ctx, cancel := context.WithTimeout(p.ctx, p.opts.StartTimeout)
 	defer cancel()
 	e.client, e.err = p.opts.Start(ctx, e.command, e.root)
@@ -434,7 +439,7 @@ func (e *entry) refresh(ctx context.Context, allowRestart bool) (restart bool, e
 		return true, nil
 	}
 	if watching {
-		if err := e.client.DidChangeWatchedFiles(ctx, changes); err != nil {
+		if err := e.client.DidChangeWatchedFiles(ctx, e.bothNames(changes)); err != nil {
 			return false, err
 		}
 	}
@@ -443,6 +448,26 @@ func (e *entry) refresh(ctx context.Context, allowRestart bool) (restart bool, e
 	}
 	e.snap = next
 	return false, nil
+}
+
+// bothNames adds, when the root is reached through a symbolic link, each
+// change again under the root's resolved path: gopls knows files by that
+// path, and ignores changes named any other way.
+func (e *entry) bothNames(changes []lsp.FileEvent) []lsp.FileEvent {
+	if e.real == "" {
+		return changes
+	}
+	out := append([]lsp.FileEvent(nil), changes...)
+	for _, c := range changes {
+		path, err := lsp.URIToPath(c.URI)
+		if err != nil {
+			continue
+		}
+		if rel, err := filepath.Rel(e.root, path); err == nil {
+			out = append(out, lsp.FileEvent{URI: lsp.FileURI(filepath.Join(e.real, rel)), Type: c.Type})
+		}
+	}
+	return out
 }
 
 // syncOpen sends the new text of changed files that another call holds

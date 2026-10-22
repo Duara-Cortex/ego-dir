@@ -46,7 +46,10 @@ func skipDir(name string) bool {
 func scan(root string, prev *snapshot) (*snapshot, []lsp.FileEvent) {
 	next := &snapshot{taken: time.Now(), files: map[string]fileState{}}
 	var events []lsp.FileEvent
-	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+	// A trailing separator makes the walk follow a root that is a symbolic
+	// link; paths are still named under root.
+	_ = filepath.WalkDir(root+string(filepath.Separator), func(path string, d fs.DirEntry, err error) error {
+		path = filepath.Clean(path)
 		if err != nil {
 			if d != nil && d.IsDir() && path != root {
 				return fs.SkipDir

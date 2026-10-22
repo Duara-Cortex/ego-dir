@@ -163,7 +163,9 @@ current two ways:
   same-size edit soon after a scan could otherwise go unseen. The changes go to the server as
   `workspace/didChangeWatchedFiles` before the call's first request. A changed file that
   another call holds open is also sent as `didChange`, because a server answers from an open
-  document's text rather than the disk. The client declares
+  document's text rather than the disk. When the root is reached through a symbolic link,
+  the scan follows it and each change is named both by the root as given and by its resolved
+  path, as gopls knows files by the latter. The client declares
   dynamic registration of that notification (in the pool only; the CLI's capabilities are
   unchanged) and records the server's `client/registerCapability`. The server is restarted
   instead when it has not registered, when `go.mod`, `go.sum` or `go.work` changed, or when
