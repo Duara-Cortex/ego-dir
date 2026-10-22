@@ -162,3 +162,20 @@ func BenchmarkScan(b *testing.B) {
 		snap, _ = scan(root, snap)
 	}
 }
+
+func TestScanFollowsASymlinkedRoot(t *testing.T) {
+	real := t.TempDir()
+	write(t, filepath.Join(real, "a.go"), "package x\n")
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skip("cannot make a symbolic link:", err)
+	}
+	snap, _ := scan(link, nil)
+	if _, ok := snap.files[filepath.Join(link, "a.go")]; !ok || len(snap.files) != 1 {
+		t.Fatalf("files = %v, want a.go named under the link", snap.files)
+	}
+	write(t, filepath.Join(real, "b.go"), "package x\n")
+	if _, evs := scan(link, snap); !reflect.DeepEqual(events(t, link, evs), []string{"+b.go"}) {
+		t.Errorf("events = %v, want +b.go", events(t, link, evs))
+	}
+}
