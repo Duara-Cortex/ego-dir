@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Lifecycle methods.
@@ -34,8 +35,18 @@ type Client struct {
 	conn *conn
 	proc *process // nil when the client was given a stream
 
+	mu       sync.Mutex
+	watchers map[string]bool // ids of didChangeWatchedFiles registrations
+
 	closeOnce sync.Once
 	closeErr  error
+}
+
+// Config chooses optional client behaviour.
+type Config struct {
+	// WatchFiles declares that the client sends
+	// workspace/didChangeWatchedFiles, and lets the server register for it.
+	WatchFiles bool
 }
 
 // TextDocumentIdentifier names a document.
@@ -94,17 +105,46 @@ var clientCapabilities = json.RawMessage(`{
 	"window": {"workDoneProgress": false}
 }`)
 
+// watchingCapabilities is clientCapabilities with dynamic registration of
+// watched-file notifications.
+var watchingCapabilities = json.RawMessage(`{
+	"textDocument": {
+		"definition": {"linkSupport": true},
+		"typeDefinition": {"linkSupport": true},
+		"implementation": {"linkSupport": true},
+		"references": {},
+		"hover": {"contentFormat": ["markdown", "plaintext"]},
+		"documentSymbol": {"hierarchicalDocumentSymbolSupport": true},
+		"callHierarchy": {}
+	},
+	"workspace": {"workspaceFolders": true, "didChangeWatchedFiles": {"dynamicRegistration": true}},
+	"window": {"workDoneProgress": false}
+}`)
+
+// methodWatchedFiles is the notification of changes to files on disk.
+const methodWatchedFiles = "workspace/didChangeWatchedFiles"
+
 // NewClient runs the initialise handshake over rwc for the workspace at
 // root. The client owns rwc and closes it in Close.
 func NewClient(ctx context.Context, rwc io.ReadWriteCloser, root string) (*Client, error) {
+	return NewClientWith(ctx, rwc, root, Config{})
+}
+
+// NewClientWith is NewClient with optional behaviour.
+func NewClientWith(ctx context.Context, rwc io.ReadWriteCloser, root string, cfg Config) (*Client, error) {
 	rootURI := FileURI(root)
-	c := &Client{conn: newConn(rwc, answerServerRequest)}
+	c := &Client{watchers: map[string]bool{}}
+	c.conn = newConn(rwc, c.answerServerRequest)
+	caps := clientCapabilities
+	if cfg.WatchFiles {
+		caps = watchingCapabilities
+	}
 	params := InitialiseParams{
 		ProcessID:        os.Getpid(),
 		ClientInfo:       ClientInfo{Name: "ego-dir"},
 		RootURI:          rootURI,
 		WorkspaceFolders: []WorkspaceFolder{{URI: rootURI, Name: filepath.Base(root)}},
-		Capabilities:     clientCapabilities,
+		Capabilities:     caps,
 	}
 	var errs []error
 	for _, h := range handshakes {
@@ -126,6 +166,70 @@ func NewClient(ctx context.Context, rwc io.ReadWriteCloser, root string) (*Clien
 	_ = c.conn.close()
 	return nil, fmt.Errorf("initialise language server: %w", errors.Join(errs...))
 }
+
+// answerServerRequest replies to requests a server sends to the client,
+// remembering which registrations are for watched files.
+func (c *Client) answerServerRequest(method string, params json.RawMessage) (any, *RPCError) {
+	switch method {
+	case "client/registerCapability":
+		var p struct {
+			Registrations []struct {
+				ID     string `json:"id"`
+				Method string `json:"method"`
+			} `json:"registrations"`
+		}
+		_ = json.Unmarshal(params, &p)
+		c.mu.Lock()
+		for _, r := range p.Registrations {
+			if r.Method == methodWatchedFiles {
+				c.watchers[r.ID] = true
+			}
+		}
+		c.mu.Unlock()
+	case "client/unregisterCapability":
+		var p struct {
+			Unregistrations []struct {
+				ID string `json:"id"`
+			} `json:"unregisterations"`
+		}
+		_ = json.Unmarshal(params, &p)
+		c.mu.Lock()
+		for _, r := range p.Unregistrations {
+			delete(c.watchers, r.ID)
+		}
+		c.mu.Unlock()
+	}
+	return answerServerRequest(method, params)
+}
+
+// WatchesFiles reports whether the server has registered for
+// workspace/didChangeWatchedFiles.
+func (c *Client) WatchesFiles() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.watchers) > 0
+}
+
+// Done is closed when the connection to the server ends, whether by Close
+// or because the server stopped.
+func (c *Client) Done() <-chan struct{} { return c.conn.done }
+
+// Annotate adds the end of a started server's stderr to err, once the
+// server has stopped. It waits briefly for the process to exit, so its last
+// words are kept. A client given a stream returns err as it is.
+func (c *Client) Annotate(err error) error {
+	if err == nil || c.proc == nil {
+		return err
+	}
+	select {
+	case <-c.proc.exited:
+	case <-time.After(annotateWait):
+	}
+	return c.proc.annotate(err)
+}
+
+// annotateWait is how long Annotate waits for a stopped server to exit.
+const annotateWait = 2 * time.Second
 
 // answerServerRequest replies to requests a server sends to the client.
 // The ones servers commonly block on are acknowledged; others are refused.
@@ -169,6 +273,43 @@ func (c *Client) DidOpen(ctx context.Context, uri, languageID, text string) erro
 	return c.conn.notify("textDocument/didOpen", map[string]any{
 		"textDocument": map[string]any{"uri": uri, "languageId": languageID, "version": 1, "text": text},
 	})
+}
+
+// DidChange replaces the whole text of an open document.
+func (c *Client) DidChange(ctx context.Context, uri string, version int, text string) error {
+	return c.conn.notify("textDocument/didChange", map[string]any{
+		"textDocument":   map[string]any{"uri": uri, "version": version},
+		"contentChanges": []map[string]any{{"text": text}},
+	})
+}
+
+// DidClose tells the server a document is closed; it reads it from disk
+// again.
+func (c *Client) DidClose(ctx context.Context, uri string) error {
+	return c.conn.notify("textDocument/didClose", map[string]any{
+		"textDocument": TextDocumentIdentifier{URI: uri},
+	})
+}
+
+// FileChangeType is how a watched file changed.
+type FileChangeType int
+
+// File change types.
+const (
+	FileCreated FileChangeType = 1
+	FileChanged FileChangeType = 2
+	FileDeleted FileChangeType = 3
+)
+
+// FileEvent is one changed file.
+type FileEvent struct {
+	URI  string         `json:"uri"`
+	Type FileChangeType `json:"type"`
+}
+
+// DidChangeWatchedFiles tells the server files changed on disk.
+func (c *Client) DidChangeWatchedFiles(ctx context.Context, changes []FileEvent) error {
+	return c.conn.notify(methodWatchedFiles, map[string]any{"changes": changes})
 }
 
 func positionParams(uri string, pos Position) TextDocumentPositionParams {

@@ -111,7 +111,7 @@ error.
 tools over stdio, so an agent can call them directly instead of running shell commands:
 
 ```sh
-ego-dir mcp [--root DIR] [--server "CMD ARGS"] [--timeout DURATION]
+ego-dir mcp [--root DIR] [--server "CMD ARGS"] [--timeout DURATION] [--idle DURATION]
 ```
 
 Register it with Claude Code (once per repository). Use absolute paths for both the binary
@@ -135,22 +135,32 @@ the same Markdown (or JSON) the CLI prints.
 
 The arguments mean what the flags of the same name mean. `file` is relative to the root.
 
-- **Fixed configuration.** `--root`, `--server` and `--timeout` are set when the server
-  starts. A tool call cannot change them: an argument the schema does not list is an error.
+- **Fixed configuration.** `--root`, `--server`, `--timeout` and `--idle` are set when the
+  server starts. A tool call cannot change them: an argument the schema does not list is an error.
 - **Confined to the root.** A `file` that resolves outside `--root`, whether by `..`, an
   absolute path or a symbolic link, is refused.
 - **Read-only.** Every tool only asks the language server questions, and says so
   (`readOnlyHint`).
 - **Errors the agent can read.** A bad argument or a failed lookup is a tool result marked
   `isError`, with the same message the CLI prints, so the agent can correct itself.
-- Each call starts its own language server and stops it afterwards, within `--timeout`
-  (counted from when the call starts running). Up to four calls run at once; more wait their
-  turn. A call the client cancels is stopped.
+- **Warm language servers.** The first call that needs a language server starts it, and later
+  calls reuse it, so only the first pays for the server loading the workspace. A server unused
+  for `--idle` (default `10m`) is shut down and started again when next needed; `--idle 0`
+  starts a fresh server for every call instead. At most four run at once (one per language
+  in practice).
+- **Never stale.** Before each call, ego-dir checks the files under `--root` for changes since
+  the last one and tells the server about them, or restarts it when the server cannot be told
+  or `go.mod`, `go.sum` or `go.work` changed. A call sees every edit saved before it started.
+- Each call runs within `--timeout` (counted from when the call starts running). Up to four
+  calls run at once; more wait their turn. A call the client cancels is stopped, and so are its
+  requests to the language server; the server keeps running for the next call. If the server
+  crashes, the call that saw it gets an error with the end of the server's stderr, and the next
+  call starts a new one.
 - Only the `file` argument is confined. A position on a use site resolves to the declaration
   it refers to, which may be outside the root (the standard library, for example), and is
   then reported like any other ego.
-- Protocol messages go to stdout, one JSON object per line; diagnostics go to stderr. The
-  server exits with `0` when stdin closes.
+- Protocol messages go to stdout, one JSON object per line; diagnostics go to stderr. When
+  stdin closes, the server shuts its language servers down and exits with `0`.
 - It speaks MCP `2026-07-28` (`server/discover`, the version in each request's `_meta`) and,
   for clients that start with `initialize`, `2025-11-25`, `2025-06-18` and `2024-11-05`.
 
@@ -165,6 +175,7 @@ internal/mcp        Model Context Protocol server (JSON-RPC 2.0 over stdio)
 internal/graph      Ego-graph engine (Node, Edge, EgoGraph, BFS Builder)
 internal/render     Markdown + JSON renderers (deterministic)
 internal/lsp        LSP harness (JSON-RPC 2.0 framing, client, server registry)
+internal/lsppool    Warm language servers shared between MCP calls
 ```
 
 ## Build and test

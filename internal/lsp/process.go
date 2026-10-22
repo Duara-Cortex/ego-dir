@@ -23,8 +23,14 @@ type process struct {
 
 // Start launches a language server with command (program and arguments)
 // in root, and runs the initialise handshake. The server's stderr is kept
-// (the last few KB) and included in errors.
+// (the last few KB) and included in errors. ctx bounds the handshake only:
+// the server runs until Close.
 func Start(ctx context.Context, command []string, root string) (*Client, error) {
+	return StartWith(ctx, command, root, Config{})
+}
+
+// StartWith is Start with optional behaviour.
+func StartWith(ctx context.Context, command []string, root string, cfg Config) (*Client, error) {
 	if len(command) == 0 || command[0] == "" {
 		return nil, errors.New("start language server: empty command")
 	}
@@ -48,7 +54,7 @@ func Start(ctx context.Context, command []string, root string) (*Client, error) 
 		close(p.exited)
 	}()
 
-	c, err := NewClient(ctx, &stdio{stdout, stdin}, root)
+	c, err := NewClientWith(ctx, &stdio{stdout, stdin}, root, cfg)
 	if err != nil {
 		p.kill()
 		return nil, p.annotate(fmt.Errorf("language server %q: %w", command[0], err))

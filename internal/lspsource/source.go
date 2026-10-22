@@ -62,16 +62,17 @@ type Source struct {
 	root  string
 	roots []string // root, and root with symlinks resolved; empty: no limit
 
-	mu    sync.Mutex
-	files map[string]*file       // by URI
-	nodes map[graph.NodeID]*info // every node handed out
+	mu      sync.Mutex
+	files   map[string]*file         // by URI
+	loading map[string]chan struct{} // closed when the URI's load ends
+	nodes   map[graph.NodeID]*info   // every node handed out
 }
 
 var _ graph.SymbolSource = (*Source)(nil)
 
 // New returns a source that asks c about the workspace at root.
 func New(c Client, root string) *Source {
-	s := &Source{c: c, root: root, files: map[string]*file{}, nodes: map[graph.NodeID]*info{}}
+	s := &Source{c: c, root: root, files: map[string]*file{}, loading: map[string]chan struct{}{}, nodes: map[graph.NodeID]*info{}}
 	if root != "" {
 		if abs, err := filepath.Abs(root); err == nil {
 			s.roots = append(s.roots, abs)
@@ -425,14 +426,41 @@ func (s *Source) fromSymbol(ctx context.Context, f *file, sym symbol, item *lsp.
 	return inf, nil
 }
 
-// load reads, opens and outlines a document once.
+// load reads, opens and outlines a document once. Concurrent loads of one
+// URI wait for the first; if it fails, the next one tries again.
 func (s *Source) load(ctx context.Context, uri string) (*file, error) {
-	s.mu.Lock()
-	f := s.files[uri]
-	s.mu.Unlock()
-	if f != nil {
-		return f, nil
+	for {
+		s.mu.Lock()
+		if f := s.files[uri]; f != nil {
+			s.mu.Unlock()
+			return f, nil
+		}
+		wait := s.loading[uri]
+		if wait == nil {
+			done := make(chan struct{})
+			s.loading[uri] = done
+			s.mu.Unlock()
+			f, err := s.open(ctx, uri)
+			s.mu.Lock()
+			delete(s.loading, uri)
+			if err == nil {
+				s.files[uri] = f
+			}
+			close(done)
+			s.mu.Unlock()
+			return f, err
+		}
+		s.mu.Unlock()
+		select {
+		case <-wait:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
+}
+
+// open reads a document, opens it on the server and outlines it.
+func (s *Source) open(ctx context.Context, uri string) (*file, error) {
 	path, err := lsp.URIToPath(uri)
 	if err != nil {
 		return nil, err
@@ -449,15 +477,8 @@ func (s *Source) load(ctx context.Context, uri string) (*file, error) {
 	if err := hardError(err); err != nil {
 		return nil, err
 	}
-	f = &file{uri: uri, path: path, lang: languageOf(uri), lines: strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")}
+	f := &file{uri: uri, path: path, lang: languageOf(uri), lines: strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")}
 	f.flatten(outline, nil)
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if prev := s.files[uri]; prev != nil {
-		return prev, nil
-	}
-	s.files[uri] = f
 	return f, nil
 }
 

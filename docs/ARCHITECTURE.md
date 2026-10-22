@@ -15,7 +15,7 @@ flowchart TB
         CLI["flag parsing"]
         Tools["tool arguments,<br/>confined to --root"]
         Validate["validate a request,<br/>1-based to LSP position conversion"]
-        Execute["execute: start a server,<br/>build, render"]
+        Execute["execute: take a server,<br/>build, render"]
         CLI --> Validate
         Tools --> Validate
         Validate --> Execute
@@ -40,7 +40,14 @@ flowchart TB
         Registry --> Client --> Conn
     end
 
+    subgraph Pool["Warm servers · internal/lsppool"]
+        Pooled["one server per command and root;<br/>shared open documents;<br/>changed files sent before each call"]
+    end
+
     Execute --> Builder
+    Execute -->|"mcp: Acquire"| Pooled
+    Execute -->|"CLI: Start"| Client
+    Pooled --> Client
     Builder -->|"SymbolSource interface"| Client
     Model --> MD & JSON
     MD & JSON -->|"stdout, or a tool result"| Agent
@@ -101,31 +108,73 @@ the CLI, so a tool's text is byte for byte what the CLI prints.
   an unknown method (`MethodNotFound`), an unknown tool or missing name (`InvalidParams`).
   Anything that goes wrong inside a tool, including bad arguments, is a result with
   `isError: true` and the message as text, which the model can read and act on.
-- **Configuration is fixed.** `--root`, `--server` and `--timeout` are read once. Tool
+- **Configuration is fixed.** `--root`, `--server`, `--timeout` and `--idle` are read once. Tool
   arguments are decoded strictly, so an argument the schema does not list (such as `root`)
   is an error rather than ignored.
 - **Confinement.** Every tool call sets `confine` on its request: `validate` refuses a file
   whose path, compared by name and again with symbolic links followed, is outside the root.
   The CLI does not set it.
-- **Concurrency.** Each `tools/call` runs in its own goroutine, with its own language server,
-  so pings and cancellations are read while it runs. At most `MaxConcurrent` (default 4)
-  run at once; the rest wait for a slot. Calls share nothing (each is a fresh server, read
-  only), so running them side by side is safe, and serialising them would make one slow call
-  hold up every other; the bound keeps a burst of calls from starting a burst of servers.
-- **Cancellation.** `notifications/cancelled` cancels the call's context, which stops its
-  language server; a cancelled call gets no reply. A call waiting for a slot gives up too.
-  When stdin closes, every running call is cancelled, the server waits for them to stop
-  their language servers, and exits with `0`.
+- **Concurrency.** Each `tools/call` runs in its own goroutine, so pings and cancellations
+  are read while it runs. At most `MaxConcurrent` (default 4) run at once; the rest wait for
+  a slot. Calls only read, and the warm server they share answers concurrent requests (the
+  client routes responses by id), so running them side by side is safe, and serialising them
+  would make one slow call hold up every other.
+- **Cancellation.** `notifications/cancelled` cancels the call's context. Its requests still
+  waiting on the language server are cancelled with `$/cancelRequest`; the server itself keeps
+  running for other calls. A cancelled call gets no reply. A call waiting for a slot gives up
+  too. When stdin closes, every running call is cancelled, the server waits for them, shuts
+  the warm language servers down (`shutdown`, then `exit`) and exits with `0`.
 
-Starting a server per call keeps calls independent but costs a server start each time. A
-warm server shared between calls would sit behind `execute`, which is the only place a
-server is started; the protocol layer would not change.
+### Warm language servers
+
+`execute` takes its language server from a provider. The CLI's starts one and stops it when
+the command ends. `ego-dir mcp`'s is a pool (`internal/lsppool`) that keeps servers running
+between calls, so only the first call pays for the server loading the workspace; with
+`--idle 0` it uses the CLI's instead. The protocol layer does not know either way.
+
+- **One server per command and root**, started by the first call that needs one. In MCP mode
+  the root is fixed, so in practice that is one per language. Calls that arrive while it
+  starts wait for the same start.
+- **Lifetime.** A server is started with a context the pool owns, bounded by `--timeout`,
+  not the call's. A call that gives up while its server starts leaves the start running, and
+  the server is kept for the next call. Only the pool stops a server.
+- **Idle shutdown.** A server unused for `--idle` (default `10m`) is shut down. At most four
+  run at once; the least recently used idle one makes way for a new one, and when all four
+  are busy a call for a fifth waits.
+- **Failure.** A server that stops by itself is dropped, and the end of its stderr is written
+  to ego-dir's stderr. The call that met it gets an `isError` result carrying that stderr;
+  the next call starts a new server (once: if that start fails, the call fails).
+
+A warm server must never answer from files as they were. Each call gets a fresh
+`lspsource.Source`, so its file and outline caches last one call, and the server is kept
+current two ways:
+
+- **Open documents** are shared between calls and counted. The first call to open a document
+  sends `didOpen`; a call that opens it with different text (the file was saved since) sends
+  `didChange` with the whole text and the next version; the last call to finish with it sends
+  `didClose`, which hands the file back to the server's view of the disk. A call sees every
+  edit saved before it started; an edit saved while it runs may reach it partway through.
+- **Files that are not open.** A server may not notice a file changing on disk, so the pool
+  tells it (`TestGoplsEditWithoutNotification` records whether gopls would have noticed by
+  itself). Before each call, the pool scans
+  the root (skipping hidden directories and `node_modules`), comparing each file's size and
+  modification time with the last scan. A file modified within two seconds of a scan is also
+  hashed, and compared by content next time: a filesystem keeps times only so finely, so a
+  same-size edit soon after a scan could otherwise go unseen. The changes go to the server as
+  `workspace/didChangeWatchedFiles` before the call's first request. A changed file that
+  another call holds open is also sent as `didChange`, because a server answers from an open
+  document's text rather than the disk. The client declares
+  dynamic registration of that notification (in the pool only; the CLI's capabilities are
+  unchanged) and records the server's `client/registerCapability`. The server is restarted
+  instead when it has not registered, when `go.mod`, `go.sum` or `go.work` changed, or when
+  more than 500 files changed at once. A restart waits for calls still using the old server.
 
 ```mermaid
 sequenceDiagram
     participant A as Agent (MCP client)
     participant M as internal/mcp
     participant T as Tool handler (cmd/ego-dir)
+    participant P as Pool (internal/lsppool)
     participant S as Language server
 
     alt modern (2026-07-28)
@@ -142,18 +191,34 @@ sequenceDiagram
     M->>M: wait for a free slot
     M->>T: handler(ctx, arguments)
     T->>T: decode strictly, validate (confined to --root)
-    T->>S: start, initialise, build the ego-graph, shutdown
+    T->>P: Acquire(server, root)
+    alt first call
+        P->>P: scan the root
+        P->>S: start, initialise (the pool's context)
+        S->>P: client/registerCapability (watched files)
+    else warm
+        P->>P: scan the root for changes
+        P->>S: workspace/didChangeWatchedFiles (or restart)
+    end
+    P-->>T: session
+    T->>S: didOpen or didChange, then build the ego-graph
     S-->>T: answers
+    T->>P: Release: didClose documents no other call holds
     T-->>M: rendered Markdown or JSON
     M-->>A: {content: [{type: text, text}], isError: false}
     opt the agent cancels
         A->>M: notifications/cancelled {requestId}
         M->>T: cancel ctx
-        T->>S: kill
-        Note over M,A: no reply for the cancelled call
+        T->>S: $/cancelRequest for its requests
+        Note over M,A: no reply for the cancelled call; the server keeps running
+    end
+    opt no call for --idle
+        P->>S: shutdown, exit
     end
     A--xM: stdin closes
     M->>T: cancel running calls, wait
+    T->>P: Close
+    P->>S: shutdown, exit
     M-->>A: exit 0
 ```
 
@@ -180,11 +245,13 @@ sequenceDiagram
     C->>S: textDocument/prepareCallHierarchy
     S-->>C: CallHierarchyItem (the ego)
     loop BFS frontier, hop 1..k
-        B->>C: incomingCalls / outgoingCalls
-        B->>C: implementation / typeDefinition / references
-        C->>S: requests (concurrent, bounded)
-        S-->>C: results
-        B->>B: dedupe by (uri, range), enqueue unseen nodes
+        par each frontier node, up to 4 at once
+            B->>C: incomingCalls / outgoingCalls
+            B->>C: implementation / typeDefinition / references
+            C->>S: requests
+            S-->>C: results
+        end
+        B->>B: merge in frontier order: dedupe by (uri, range), enqueue unseen nodes
     end
     B->>C: hover (signature + doc) for each node
     B-->>CLI: EgoGraph (sorted)
@@ -281,6 +348,10 @@ offset=…`), horizontal rules, the method-set code block and the pkg.go.dev lin
   of its implementations. The edge itself keeps its concrete-to-interface orientation.
 - A node's hop is its shortest distance from the ego. Nodes at hop `k` are not expanded.
 - Each node is expanded at most once per direction (language-server calls are expensive).
+- A hop asks for its frontier's neighbours concurrently, at most four at once
+  (`graph.DefaultParallel`), and merges the answers in frontier order once they are all in,
+  so the graph is the same as when they are asked one at a time. The first failure cancels the
+  requests still running and is the error returned. The CLI and MCP both do this.
 - An edge seen from both of its ends is stored once. Its weight is the larger of the two
   reported weights, not their sum.
 - Default edge kinds are `calls,implements,instantiates,imports`. `references` is opt-in,
@@ -360,7 +431,9 @@ fails. Errors in tool calls never end it.
 | CLI          | `run(args, stdout, stderr) int` tested in-process: flags, validation, exit codes      |
 | MCP protocol | Scripted client over `io.Pipe`: both eras (discover, `_meta` versions, handshake), framing, errors, notifications, cancellation, the concurrency bound, EOF |
 | MCP tools    | `ego-dir mcp` in-process against the fake server: tool text equals the CLI's output and the golden file; confinement; errors as `isError` |
-| Integration  | `//go:build integration`, real `gopls` on `testdata/sample`, skipped when gopls is missing |
+| Graph, parallel | The parallel result equals the serial one across depths, directions and edge kinds; the bound holds; the first error cancels the rest |
+| Pool         | In-process fake servers over pipes, and the fake as a process: lazy start, reuse, idle shutdown, the cap, cancellation that keeps the server, shared and counted documents, changed files sent or a restart, crashes, shutdown on close |
+| Integration  | `//go:build integration`, real `gopls` on `testdata/sample`, skipped when gopls is missing. Includes what a warm gopls needs to see an edit to a file that is not open, and an edit between two MCP calls |
 
 ### Pending acceptance tests
 
@@ -376,6 +449,10 @@ Shared fixtures, which run today:
   `report/report.go`, that imports it and two standard-library packages.
 - `internal/lsp/lspfake`: a scripted LSP server with its own framing code, independent of
   the client. Its `Sample` scenario answers like gopls v0.23 for `testdata/sample`, computing
-  every position from the files themselves. Test binaries re-run themselves as this server (via
-  `EGO_DIR_LSPFAKE=sample`), which tests process spawning and the CLI end to end without
-  gopls.
+  every position from the files themselves. Like gopls, it reads the files once and then
+  learns of edits only from `didOpen`, `didChange`, `didClose` and
+  `workspace/didChangeWatchedFiles`, and registers for the last when the client allows it.
+  Test binaries re-run themselves as this server (via `EGO_DIR_LSPFAKE=sample`), which tests
+  process spawning and the CLI end to end without gopls. More variables script it further:
+  per-request latency, an initialise delay, a crash on demand and a log of its starts and
+  clean exits.

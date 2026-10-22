@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // SampleFile is the main file of the sample workspace (testdata/sample),
@@ -70,6 +71,24 @@ const (
 // fake language server. See RunHelperIfRequested.
 const EnvHelper = "EGO_DIR_LSPFAKE"
 
+// Environment variables that script the helper process further.
+const (
+	// EnvLatency is a duration (such as "5ms") added to every request.
+	EnvLatency = "EGO_DIR_LSPFAKE_LATENCY"
+	// EnvInitialiseDelay is a duration added to the initialise request.
+	EnvInitialiseDelay = "EGO_DIR_LSPFAKE_INITIALISE_DELAY"
+	// EnvCrashFile names a file. When it exists as a request arrives, the
+	// helper removes it, writes a note to stderr and exits with code 3, so
+	// a test can crash the server at a moment it chooses, once.
+	EnvCrashFile = "EGO_DIR_LSPFAKE_CRASH_FILE"
+	// EnvLog names a file the helper appends "start <pid>" to when it
+	// starts and "exit <pid>" to when it exits after the exit notification.
+	EnvLog = "EGO_DIR_LSPFAKE_LOG"
+)
+
+// CrashNote is what the helper writes to stderr before it crashes.
+const CrashNote = "lspfake: crashing as asked"
+
 // RunHelperIfRequested serves the Sample scenario on stdin/stdout and exits
 // when EnvHelper is set to "sample". Call it first in TestMain. A test can
 // then start os.Args[0] (with the variable set) as a real language-server
@@ -80,6 +99,24 @@ func RunHelperIfRequested() {
 	}
 	s := New()
 	Sample(s)
+	for env, d := range map[string]*time.Duration{EnvLatency: &s.Latency, EnvInitialiseDelay: &s.InitialiseDelay} {
+		if v := os.Getenv(env); v != "" {
+			var err error
+			if *d, err = time.ParseDuration(v); err != nil {
+				fmt.Fprintf(os.Stderr, "lspfake: %s: %v\n", env, err)
+				os.Exit(1)
+			}
+		}
+	}
+	if crash := os.Getenv(EnvCrashFile); crash != "" {
+		s.BeforeRequest = func(string) {
+			if os.Remove(crash) == nil {
+				fmt.Fprintln(os.Stderr, CrashNote)
+				os.Exit(3)
+			}
+		}
+	}
+	logEvent("start")
 	err := s.Serve(context.Background(), struct {
 		io.Reader
 		io.Writer
@@ -88,7 +125,22 @@ func RunHelperIfRequested() {
 		fmt.Fprintln(os.Stderr, "lspfake:", err)
 		os.Exit(1)
 	}
+	logEvent("exit")
 	os.Exit(0)
+}
+
+// logEvent appends "<event> <pid>" to the EnvLog file, if one is named.
+func logEvent(event string) {
+	path := os.Getenv(EnvLog)
+	if path == "" {
+		return
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprintf(f, "%s %d\n", event, os.Getpid())
 }
 
 // SampleRoot returns the absolute path of testdata/sample, walking up from
@@ -144,6 +196,19 @@ func SampleRoot() (string, error) {
 func Sample(s *Server) {
 	sc := &sampleScenario{}
 	initialise := func(_ context.Context, p json.RawMessage) (any, error) {
+		var caps struct {
+			Capabilities struct {
+				Workspace struct {
+					DidChangeWatchedFiles struct {
+						DynamicRegistration bool `json:"dynamicRegistration"`
+					} `json:"didChangeWatchedFiles"`
+				} `json:"workspace"`
+			} `json:"capabilities"`
+		}
+		_ = json.Unmarshal(p, &caps)
+		sc.mu.Lock()
+		sc.register = caps.Capabilities.Workspace.DidChangeWatchedFiles.DynamicRegistration
+		sc.mu.Unlock()
 		if err := sc.load(p); err != nil {
 			return nil, &Error{Code: CodeInvalidParams, Message: err.Error()}
 		}
@@ -302,9 +367,104 @@ func Sample(s *Server) {
 		}
 		return top, nil
 	})
-	for _, n := range []string{"textDocument/didOpen", "textDocument/didClose", "initialised", "initialized"} {
-		s.Handle(n, func(context.Context, json.RawMessage) (any, error) { return nil, nil })
+	initialised := func(ctx context.Context, _ json.RawMessage) (any, error) {
+		sc.mu.Lock()
+		register := sc.register
+		sc.mu.Unlock()
+		if register {
+			// The read loop must stay free to read the client's reply.
+			go s.Call(ctx, "client/registerCapability", map[string]any{"registrations": []any{map[string]any{
+				"id": SampleWatcherID, "method": "workspace/didChangeWatchedFiles",
+				"registerOptions": map[string]any{"watchers": []any{map[string]any{"globPattern": "**/*.{go,mod,sum,work}"}}},
+			}}})
+		}
+		return nil, nil
 	}
+	s.Handle("initialised", initialised)
+	s.Handle("initialized", initialised)
+	s.Handle("textDocument/didOpen", func(_ context.Context, p json.RawMessage) (any, error) {
+		var params struct {
+			TextDocument struct {
+				URI  string `json:"uri"`
+				Text string `json:"text"`
+			} `json:"textDocument"`
+		}
+		_ = json.Unmarshal(p, &params)
+		sc.setOverlay(params.TextDocument.URI, &params.TextDocument.Text)
+		return nil, nil
+	})
+	s.Handle("textDocument/didChange", func(_ context.Context, p json.RawMessage) (any, error) {
+		var params struct {
+			TextDocument struct {
+				URI string `json:"uri"`
+			} `json:"textDocument"`
+			ContentChanges []struct {
+				Text string `json:"text"`
+			} `json:"contentChanges"`
+		}
+		_ = json.Unmarshal(p, &params)
+		if n := len(params.ContentChanges); n > 0 {
+			sc.setOverlay(params.TextDocument.URI, &params.ContentChanges[n-1].Text)
+		}
+		return nil, nil
+	})
+	s.Handle("textDocument/didClose", func(_ context.Context, p json.RawMessage) (any, error) {
+		var params struct {
+			TextDocument struct {
+				URI string `json:"uri"`
+			} `json:"textDocument"`
+		}
+		_ = json.Unmarshal(p, &params)
+		sc.setOverlay(params.TextDocument.URI, nil)
+		return nil, nil
+	})
+	s.Handle("workspace/didChangeWatchedFiles", func(_ context.Context, p json.RawMessage) (any, error) {
+		var params struct {
+			Changes []struct {
+				URI string `json:"uri"`
+			} `json:"changes"`
+		}
+		_ = json.Unmarshal(p, &params)
+		sc.mu.Lock()
+		defer sc.mu.Unlock()
+		if sc.disk == nil {
+			return nil, nil // not initialised
+		}
+		for _, c := range params.Changes {
+			if path, err := uriPath(c.URI); err == nil {
+				if src, err := os.ReadFile(path); err == nil {
+					sc.disk[path] = string(src)
+				} else {
+					delete(sc.disk, path)
+				}
+			}
+		}
+		_ = sc.rebuild()
+		return nil, nil
+	})
+}
+
+// SampleWatcherID is the id of the sample's registration for watched files.
+const SampleWatcherID = "lspfake-watched-files"
+
+// setOverlay sets (text non-nil) or clears the open text of the document
+// at uri, and recomputes the scenario.
+func (sc *sampleScenario) setOverlay(uri string, text *string) {
+	path, err := uriPath(uri)
+	if err != nil {
+		return
+	}
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	if sc.overlay == nil {
+		return // not initialised
+	}
+	if text != nil {
+		sc.overlay[path] = *text
+	} else {
+		delete(sc.overlay, path)
+	}
+	_ = sc.rebuild()
 }
 
 type position struct {
@@ -389,6 +549,7 @@ type symbol struct {
 	methods   string     // a struct's method set, as gopls hovers it
 	uses      []location // a type's or field's uses, for references and definition
 	header    bool       // the name in a package clause
+	optional  bool       // left out when the fixture does not declare it
 }
 
 func (sym *symbol) isType() bool { return sym.kind == KindInterface || sym.kind == KindStruct }
@@ -425,6 +586,10 @@ type call struct {
 
 type sampleScenario struct {
 	mu        sync.Mutex
+	register  bool              // the client allows dynamic registration
+	dir       string            // the workspace root
+	disk      map[string]string // file text by path, as last read from disk
+	overlay   map[string]string // open documents' text by path
 	modPath   string
 	goVersion string // from go.mod, e.g. "1.26"
 	files     []*sampleFile
@@ -453,6 +618,7 @@ func sampleSymbols() []*symbol {
 		{key: "Report", name: "Report", kind: KindFunction, in: SampleFile, decl: "func Report(", typeOf: "float64"},
 		{key: "Describe", name: "Describe", kind: KindFunction, in: SampleReportFile, decl: "func Describe(", typeOf: "string"},
 		{key: "Label", name: "Label", kind: KindFunction, in: SampleReportFile, decl: "func Label(", typeOf: "string"},
+		{key: "Summary", name: "Summary", kind: KindFunction, in: SampleReportFile, decl: "func Summary(", typeOf: "float64", optional: true},
 	}
 }
 
@@ -463,6 +629,7 @@ func sampleCalls() []*call {
 		{from: "Report", to: "NewRect", needle: "NewRect("},
 		{from: "Describe", to: "fmt.Sprintf", needle: "Sprintf("},
 		{from: "Label", to: "strings.ToUpper", needle: "ToUpper("},
+		{from: "Summary", to: "TotalArea", needle: "TotalArea("},
 	}
 }
 
@@ -500,13 +667,36 @@ func (sc *sampleScenario) load(params json.RawMessage) error {
 	if err != nil {
 		return fmt.Errorf("root: %w", err)
 	}
-	gomod, err := os.ReadFile(filepath.Join(dir, "go.mod"))
-	if err != nil {
-		return err
+	disk := map[string]string{}
+	for _, rel := range append([]string{"go.mod"}, sampleFiles...) {
+		p := filepath.Join(dir, filepath.FromSlash(rel))
+		src, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		disk[p] = string(src)
 	}
-
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
+	sc.dir, sc.disk, sc.overlay = dir, disk, map[string]string{}
+	return sc.rebuild()
+}
+
+// rebuild recomputes the scenario from the files as the server knows them:
+// open text first, then what it last read from disk. On failure the
+// previous state is kept. sc.mu must be held.
+func (sc *sampleScenario) rebuild() (err error) {
+	modPath, goVersion, files, syms, order, calls := sc.modPath, sc.goVersion, sc.files, sc.syms, sc.order, sc.calls
+	defer func() {
+		if err != nil {
+			sc.modPath, sc.goVersion, sc.files, sc.syms, sc.order, sc.calls = modPath, goVersion, files, syms, order, calls
+		}
+	}()
+	dir := sc.dir
+	gomod, ok := sc.known(filepath.Join(dir, "go.mod"))
+	if !ok {
+		return errors.New("lspfake: no go.mod")
+	}
 	sc.modPath, sc.goVersion = "", ""
 	for _, line := range strings.Split(string(gomod), "\n") {
 		if f := strings.Fields(line); len(f) == 2 && f[0] == "module" {
@@ -535,6 +725,9 @@ func (sc *sampleScenario) load(params json.RawMessage) error {
 		} else {
 			err = sym.locate()
 		}
+		if err != nil && sym.optional {
+			continue
+		}
 		if err != nil {
 			return err
 		}
@@ -549,9 +742,12 @@ func (sc *sampleScenario) load(params json.RawMessage) error {
 	for _, f := range sc.files {
 		f.header.uses = sc.importSpecs(f.pkgPath)
 	}
-	sc.calls = sampleCalls()
-	for _, c := range sc.calls {
+	sc.calls = nil
+	for _, c := range sampleCalls() {
 		from := sc.syms[c.from]
+		if from == nil || (sc.syms[c.to] == nil && sampleExternals[c.to].uri == "") {
+			continue // an optional symbol not in the fixture
+		}
 		lines := from.file.lines
 		for l := from.full.Start.Line; l <= from.full.End.Line; l++ {
 			line := lines[l]
@@ -573,16 +769,26 @@ func (sc *sampleScenario) load(params json.RawMessage) error {
 		if len(c.sites) == 0 {
 			return fmt.Errorf("no call site for %s -> %s", c.from, c.to)
 		}
+		sc.calls = append(sc.calls, c)
 	}
 	return nil
+}
+
+// known returns the text of the file at path as the server knows it.
+func (sc *sampleScenario) known(path string) (string, bool) {
+	if text, ok := sc.overlay[path]; ok {
+		return text, true
+	}
+	text, ok := sc.disk[path]
+	return text, ok
 }
 
 // loadFile reads one file of the workspace and its package clause.
 func (sc *sampleScenario) loadFile(root, rel string) (*sampleFile, error) {
 	p := filepath.Join(root, filepath.FromSlash(rel))
-	src, err := os.ReadFile(p)
-	if err != nil {
-		return nil, err
+	src, ok := sc.known(p)
+	if !ok {
+		return nil, fmt.Errorf("lspfake: %s does not exist", rel)
 	}
 	f := &sampleFile{
 		rel:   rel,

@@ -53,6 +53,9 @@ Flags (mcp), fixed for the server's lifetime:
                       (default: current directory)
   --server "CMD ARGS" language server command (default: chosen by file extension)
   --timeout DURATION  deadline for each tool call (default: 30s)
+  --idle DURATION     keep each language server running between calls, and
+                      shut it down after this long without one; 0 starts a
+                      fresh server for every call (default: 10m)
 
 Exit codes: 0 success, 1 usage error, 2 language server or runtime error.
 `

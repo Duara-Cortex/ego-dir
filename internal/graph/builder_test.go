@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"reflect"
 	"sort"
+	"sync"
 	"testing"
 
 	"github.com/Duara-Cortex/ego-dir/internal/graph"
@@ -14,7 +15,9 @@ import (
 
 // fakeSource is an in-memory SymbolSource over a fixed set of edges.
 // It deliberately ignores the kinds filter, so the builder must filter.
+// It is safe for concurrent use.
 type fakeSource struct {
+	mu       sync.Mutex
 	nodes    map[string]graph.Node // by name
 	edges    []fakeEdge
 	shuffle  *rand.Rand
@@ -63,6 +66,8 @@ func (s *fakeSource) Resolve(ctx context.Context, uri string, line, char int) (g
 	if err := ctx.Err(); err != nil {
 		return graph.Node{}, err
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	for _, n := range s.nodes {
 		// line/char are 0-based LSP coordinates; Selection is 1-based.
 		if n.URI == uri && n.Selection.StartLine == line+1 && n.Selection.StartCol == char+1 {
@@ -83,6 +88,8 @@ func (s *fakeSource) Neighbors(ctx context.Context, n graph.Node, dir graph.Dire
 	if dir != graph.DirIn && dir != graph.DirOut {
 		return nil, errors.New("Neighbors must be called with DirIn or DirOut")
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	key := n.Name + map[graph.Direction]string{graph.DirIn: "/in", graph.DirOut: "/out"}[dir]
 	s.expanded[key]++
 	var out []graph.Neighbor
