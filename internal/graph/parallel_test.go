@@ -131,21 +131,29 @@ func TestParallelBound(t *testing.T) {
 	}
 }
 
-// failing fails Neighbors for one node at once, and holds every other call
-// until its context is cancelled.
+// failing fails Neighbors for one node and holds every other call until
+// its context is cancelled. The failure waits until holdFor calls are
+// holding, so they are running when it comes.
 type failing struct {
 	*fakeSource
 	bad       string
+	holdFor   int32
+	holding   atomic.Int32
 	cancelled atomic.Int32
 }
 
 func (f *failing) Neighbors(ctx context.Context, n graph.Node, dir graph.Direction, kinds []graph.EdgeKind) ([]graph.Neighbor, error) {
 	if n.Name == f.bad {
+		deadline := time.Now().Add(5 * time.Second)
+		for f.holding.Load() < f.holdFor && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
+		}
 		return nil, errSource
 	}
 	if n.Name == "T" {
 		return f.fakeSource.Neighbors(ctx, n, dir, kinds)
 	}
+	f.holding.Add(1)
 	select {
 	case <-ctx.Done():
 		f.cancelled.Add(1)
@@ -156,7 +164,9 @@ func (f *failing) Neighbors(ctx context.Context, n graph.Node, dir graph.Directi
 }
 
 func TestParallelCancelsTheRestOnError(t *testing.T) {
-	src := &failing{fakeSource: fan(), bad: "C01"} // C00 and C01, in and out, start first
+	// C00 and C01, in and out, take the four slots: C01 fails once both
+	// calls for C00 are holding.
+	src := &failing{fakeSource: fan(), bad: "C01", holdFor: 2}
 	ego := src.nodes["T"]
 	start := time.Now()
 	_, err := graph.Build(context.Background(), src, ego.URI, ego.Selection.StartLine-1, ego.Selection.StartCol-1,
@@ -170,8 +180,8 @@ func TestParallelCancelsTheRestOnError(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Errorf("Build took %v; the other calls were not cancelled", elapsed)
 	}
-	if src.cancelled.Load() == 0 {
-		t.Error("no running call saw its context cancelled")
+	if got := src.cancelled.Load(); got != 2 {
+		t.Errorf("%d running calls saw their context cancelled, want both calls for C00", got)
 	}
 }
 
