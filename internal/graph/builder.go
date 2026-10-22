@@ -4,10 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 )
 
 // MaxDepth is the largest hop radius Build accepts.
 const MaxDepth = 5
+
+// DefaultParallel is how many Neighbors calls a hop makes at once when
+// Options.Parallel is not set.
+const DefaultParallel = 4
 
 // Direction selects which side of the ego to explore.
 type Direction int
@@ -55,6 +60,10 @@ type Options struct {
 	Kinds     []EdgeKind // edge kinds to follow; at least one
 	Direction Direction
 	Body      BodyMode
+	// Parallel bounds the Neighbors calls a hop makes at once. Zero means
+	// DefaultParallel; 1 asks one at a time. The result does not depend on
+	// it.
+	Parallel int
 }
 
 func (o Options) validate() error {
@@ -74,6 +83,9 @@ func (o Options) validate() error {
 	}
 	if o.Body < BodyEgo || o.Body > BodyNone {
 		return fmt.Errorf("unknown body mode %d", o.Body)
+	}
+	if o.Parallel < 0 {
+		return fmt.Errorf("parallel %d is negative", o.Parallel)
 	}
 	return nil
 }
@@ -97,10 +109,11 @@ func Build(ctx context.Context, src SymbolSource, uri string, line, char int, op
 	ego.Hop = 0
 
 	b := &builder{
-		src:   src,
-		kinds: map[EdgeKind]bool{},
-		cache: map[expansion][]Neighbor{},
-		g:     &EgoGraph{Ego: ego.ID, Depth: opts.Depth},
+		src:      src,
+		parallel: opts.Parallel,
+		kinds:    map[EdgeKind]bool{},
+		cache:    map[expansion][]Neighbor{},
+		g:        &EgoGraph{Ego: ego.ID, Depth: opts.Depth},
 	}
 	for _, k := range opts.Kinds {
 		b.kinds[k] = true
@@ -136,6 +149,7 @@ type expansion struct {
 
 type builder struct {
 	src      SymbolSource
+	parallel int
 	kinds    map[EdgeKind]bool
 	kindList []EdgeKind
 	cache    map[expansion][]Neighbor // each node is asked once per direction
@@ -143,40 +157,49 @@ type builder struct {
 }
 
 // search runs a breadth-first search from ego in direction dir, adding
-// every node within depth hops and every edge followed on the way.
+// every node within depth hops and every edge followed on the way. Each
+// hop fetches its frontier's neighbours concurrently, then merges them in
+// frontier order, so the graph is the same as when they are fetched one at
+// a time.
 func (b *builder) search(ctx context.Context, ego Node, dir Direction, depth int) error {
 	seen := map[NodeID]bool{ego.ID: true}
 	frontier := []Node{ego}
 	for hop := 1; hop <= depth && len(frontier) > 0; hop++ {
-		var next []Node
+		var keys []expansion
+		var nodes []Node
 		for _, n := range frontier {
 			for _, side := range []Direction{DirIn, DirOut} {
 				if side != dir && !b.kinds[EdgeImplements] {
 					continue
 				}
-				nbrs, err := b.neighbors(ctx, n, side)
-				if err != nil {
-					return err
+				keys = append(keys, expansion{n.ID, side})
+				nodes = append(nodes, n)
+			}
+		}
+		if err := b.fetch(ctx, keys, nodes); err != nil {
+			return err
+		}
+		var next []Node
+		for i, key := range keys {
+			n, side := nodes[i], key.dir
+			for _, nb := range b.cache[key] {
+				// Only implements edges are followed against the
+				// search direction.
+				if !b.kinds[nb.Kind] || (side != dir && nb.Kind != EdgeImplements) {
+					continue
 				}
-				for _, nb := range nbrs {
-					// Only implements edges are followed against the
-					// search direction.
-					if !b.kinds[nb.Kind] || (side != dir && nb.Kind != EdgeImplements) {
-						continue
-					}
-					alter := nb.Node
-					alter.ID = nodeID(alter)
-					alter.Hop = hop
-					from, to := alter.ID, n.ID
-					if side == DirOut {
-						from, to = n.ID, alter.ID
-					}
-					b.g.AddNode(alter)
-					b.g.AddEdge(Edge{From: from, To: to, Kind: nb.Kind, Weight: nb.Weight})
-					if !seen[alter.ID] {
-						seen[alter.ID] = true
-						next = append(next, alter)
-					}
+				alter := nb.Node
+				alter.ID = nodeID(alter)
+				alter.Hop = hop
+				from, to := alter.ID, n.ID
+				if side == DirOut {
+					from, to = n.ID, alter.ID
+				}
+				b.g.AddNode(alter)
+				b.g.AddEdge(Edge{From: from, To: to, Kind: nb.Kind, Weight: nb.Weight})
+				if !seen[alter.ID] {
+					seen[alter.ID] = true
+					next = append(next, alter)
 				}
 			}
 		}
@@ -185,11 +208,57 @@ func (b *builder) search(ctx context.Context, ego Node, dir Direction, depth int
 	return nil
 }
 
-func (b *builder) neighbors(ctx context.Context, n Node, dir Direction) ([]Neighbor, error) {
-	key := expansion{n.ID, dir}
-	if nbrs, ok := b.cache[key]; ok {
-		return nbrs, nil
+// fetch fills the cache for every key (node nodes[i], direction keys[i].dir)
+// not already in it, at most b.parallel at once. The first error cancels
+// the calls still running and is returned.
+func (b *builder) fetch(ctx context.Context, keys []expansion, nodes []Node) error {
+	limit := b.parallel
+	if limit <= 0 {
+		limit = DefaultParallel
 	}
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	results := make([][]Neighbor, len(keys))
+	todo := make([]bool, len(keys))
+	slots := make(chan struct{}, limit)
+	var wg sync.WaitGroup
+	for i, key := range keys {
+		if _, ok := b.cache[key]; ok {
+			continue
+		}
+		todo[i] = true
+		select {
+		case slots <- struct{}{}:
+		case <-ctx.Done():
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		wg.Go(func() {
+			defer func() { <-slots }()
+			nbrs, err := b.neighbors(ctx, nodes[i], key.dir)
+			if err != nil {
+				cancel(err)
+				return
+			}
+			results[i] = nbrs
+		})
+	}
+	wg.Wait()
+	if ctx.Err() != nil {
+		return context.Cause(ctx)
+	}
+	for i, key := range keys {
+		if todo[i] {
+			b.cache[key] = results[i]
+		}
+	}
+	return nil
+}
+
+// neighbors asks the source for n's neighbours in direction dir. It is
+// called concurrently and touches no builder state.
+func (b *builder) neighbors(ctx context.Context, n Node, dir Direction) ([]Neighbor, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -197,7 +266,6 @@ func (b *builder) neighbors(ctx context.Context, n Node, dir Direction) ([]Neigh
 	if err != nil {
 		return nil, fmt.Errorf("expand %s: %w", n.Name, err)
 	}
-	b.cache[key] = nbrs
 	return nbrs, nil
 }
 

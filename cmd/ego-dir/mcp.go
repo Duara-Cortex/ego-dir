@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Duara-Cortex/ego-dir/internal/graph"
+	"github.com/Duara-Cortex/ego-dir/internal/lsppool"
 	"github.com/Duara-Cortex/ego-dir/internal/mcp"
 )
 
@@ -21,17 +22,37 @@ type mcpConfig struct {
 	root    string // absolute
 	server  string // "" chooses by file extension
 	timeout time.Duration
+	idle    time.Duration // 0: a fresh language server per call
 }
 
+// defaultIdle is how long a warm language server waits for another call.
+const defaultIdle = 10 * time.Minute
+
+// shutdownTimeout bounds stopping the warm servers when stdin closes.
+const shutdownTimeout = 5 * time.Second
+
 // runMCP serves the position commands as MCP tools on stdin and stdout
-// until stdin closes.
+// until stdin closes. Language servers are kept warm between calls unless
+// --idle is 0; when stdin closes they are shut down.
 func runMCP(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	cfg, err := parseMCPFlags(args)
 	if err != nil {
 		return err
 	}
 	fmt.Fprintf(stderr, "ego-dir %s: serving MCP on stdio for %s\n", version, cfg.root)
-	return mcpServer(cfg).Serve(context.Background(), stdin, stdout)
+	var srv servers = oneShot{}
+	if cfg.idle > 0 {
+		pool := lsppool.New(lsppool.Options{Idle: cfg.idle, Max: mcp.DefaultMaxConcurrent, StartTimeout: cfg.timeout, Log: stderr})
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+			defer cancel()
+			if err := pool.Close(ctx); err != nil {
+				fmt.Fprintf(stderr, "ego-dir: %v\n", err)
+			}
+		}()
+		srv = pooled{pool}
+	}
+	return mcpServer(cfg, srv).Serve(context.Background(), stdin, stdout)
 }
 
 func parseMCPFlags(args []string) (mcpConfig, error) {
@@ -40,6 +61,7 @@ func parseMCPFlags(args []string) (mcpConfig, error) {
 	root := fs.String("root", "", "")
 	server := fs.String("server", "", "")
 	timeout := fs.Duration("timeout", newRequest("").timeout, "")
+	idle := fs.Duration("idle", defaultIdle, "")
 	if err := fs.Parse(args); err != nil {
 		return mcpConfig{}, usageError{err}
 	}
@@ -49,14 +71,17 @@ func parseMCPFlags(args []string) (mcpConfig, error) {
 	if *timeout <= 0 {
 		return mcpConfig{}, usagef("--timeout must be positive")
 	}
+	if *idle < 0 {
+		return mcpConfig{}, usagef("--idle must not be negative")
+	}
 	abs, err := absRoot(*root)
 	if err != nil {
 		return mcpConfig{}, err
 	}
-	return mcpConfig{root: abs, server: *server, timeout: *timeout}, nil
+	return mcpConfig{root: abs, server: *server, timeout: *timeout, idle: *idle}, nil
 }
 
-func mcpServer(cfg mcpConfig) *mcp.Server {
+func mcpServer(cfg mcpConfig, srv servers) *mcp.Server {
 	s := &mcp.Server{Name: "ego-dir", Version: version}
 	for _, cmd := range []string{"inspect_ego", "resolve_definition", "find_references"} {
 		s.Tools = append(s.Tools, mcp.Tool{
@@ -65,7 +90,7 @@ func mcpServer(cfg mcpConfig) *mcp.Server {
 			Description: toolDescriptions[cmd],
 			InputSchema: inputSchema(cmd),
 			Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
-				return callTool(ctx, cfg, cmd, args)
+				return callTool(ctx, cfg, srv, cmd, args)
 			},
 		})
 	}
@@ -142,7 +167,7 @@ type toolArgs struct {
 
 // callTool runs cmd for an MCP tool call through the same validation and
 // execution as the CLI. The file must be inside the root.
-func callTool(ctx context.Context, cfg mcpConfig, cmd string, raw json.RawMessage) (string, error) {
+func callTool(ctx context.Context, cfg mcpConfig, srv servers, cmd string, raw json.RawMessage) (string, error) {
 	r, err := toolRequest(cmd, raw)
 	if err != nil {
 		return "", err
@@ -153,7 +178,7 @@ func callTool(ctx context.Context, cfg mcpConfig, cmd string, raw json.RawMessag
 		return "", err
 	}
 	var out bytes.Buffer
-	if err := execute(ctx, cmd, o, &out); err != nil {
+	if err := execute(ctx, cmd, o, srv, &out); err != nil {
 		return "", err
 	}
 	return out.String(), nil

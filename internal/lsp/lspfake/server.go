@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // JSON-RPC and LSP error codes used by the fake.
@@ -56,9 +57,20 @@ func (e *Error) Error() string { return fmt.Sprintf("jsonrpc error %d: %s", e.Co
 // request or when Serve returns.
 type Handler func(ctx context.Context, params json.RawMessage) (any, error)
 
-// Server is a scripted LSP server. Configure it with Handle or Result, then
-// call Serve. Requests are handled concurrently, one goroutine each.
+// Server is a scripted LSP server. Configure it with Handle or Result and
+// the fields below, then call Serve. Requests are handled concurrently, one
+// goroutine each.
 type Server struct {
+	// Latency delays the answer to every request other than the initialise
+	// handshake and shutdown, as a slow server would.
+	Latency time.Duration
+	// InitialiseDelay delays the answer to the initialise request, as a
+	// server loading a workspace would.
+	InitialiseDelay time.Duration
+	// BeforeRequest, when set, is called with the method of each request
+	// before it is answered.
+	BeforeRequest func(method string)
+
 	mu       sync.Mutex
 	handlers map[string]Handler
 	received []Message
@@ -228,6 +240,25 @@ func (s *Server) handler(method string) Handler {
 
 func (s *Server) answer(ctx context.Context, m Message) {
 	resp := map[string]any{"jsonrpc": "2.0", "id": m.ID}
+	if s.BeforeRequest != nil {
+		s.BeforeRequest(m.Method)
+	}
+	delay := s.Latency
+	switch m.Method {
+	case "initialise", "initialize":
+		delay = s.InitialiseDelay
+	case "shutdown":
+		delay = 0
+	}
+	if delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			resp["error"] = &Error{Code: CodeRequestCancelled, Message: ctx.Err().Error()}
+			_ = s.write(resp)
+			return
+		}
+	}
 	h := s.handler(m.Method)
 	if h == nil {
 		resp["error"] = &Error{Code: CodeMethodNotFound, Message: "method not found: " + m.Method}
