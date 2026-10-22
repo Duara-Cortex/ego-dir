@@ -14,10 +14,14 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Each job's timeout is a few times its usual run, so a hung job fails in
+# minutes rather than at GitHub's six-hour default.
 jobs:
   test:
     name: Unit Tests
     runs-on: ubuntu-latest
+    # Kept short: this job gates merges.
+    timeout-minutes: 5
     steps:
       - name: Checkout Code
         uses: actions/checkout@v5
@@ -34,6 +38,8 @@ jobs:
   integration:
     name: Integration Tests (gopls)
     runs-on: ubuntu-latest
+    # Also builds gopls from source.
+    timeout-minutes: 12
     env:
       # The golden files and lspfake follow this gopls's output. Bump it on purpose.
       GOPLS_VERSION: v0.23.0
@@ -69,6 +75,8 @@ jobs:
   package:
     name: Cross-Compile
     runs-on: ubuntu-latest
+    # Six platforms, built one after another.
+    timeout-minutes: 8
     steps:
       - name: Checkout Code
         uses: actions/checkout@v5

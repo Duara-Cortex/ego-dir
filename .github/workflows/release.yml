@@ -12,6 +12,9 @@ jobs:
   build-and-release:
     name: Build & Release Binaries
     runs-on: ubuntu-latest
+    # Tests, six platform builds and the upload, a few times over, so a hung
+    # release fails in minutes rather than at GitHub's six-hour default.
+    timeout-minutes: 15
     steps:
       - name: Checkout Code
         uses: actions/checkout@v5
