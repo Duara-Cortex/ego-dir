@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime/debug"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
+// Report it with currentVersion, which also reads the build info.
 var version = "dev"
 
 // Exit codes.
@@ -60,6 +62,36 @@ Flags (mcp), fixed for the server's lifetime:
 Exit codes: 0 success, 1 usage error, 2 language server or runtime error.
 `
 
+// currentVersion is the version this binary reports.
+func currentVersion() string {
+	info, ok := debug.ReadBuildInfo()
+	return resolveVersion(version, info, ok)
+}
+
+// resolveVersion picks the version to report. A version set with -ldflags
+// wins. Otherwise a binary built by go install module@version reports the
+// module version from its build info, pseudo-versions included. A build
+// from a checkout carries VCS settings and a version derived from them
+// (a tag or pseudo-version, perhaps +dirty), and reports "dev", as does a
+// binary with no build info.
+func resolveVersion(ldflags string, info *debug.BuildInfo, ok bool) string {
+	if ldflags != "" && ldflags != "dev" {
+		return ldflags
+	}
+	if !ok || info == nil {
+		return "dev"
+	}
+	for _, s := range info.Settings {
+		if s.Key == "vcs" {
+			return "dev"
+		}
+	}
+	if v := info.Main.Version; v != "" && v != "(devel)" {
+		return v
+	}
+	return "dev"
+}
+
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
@@ -94,7 +126,7 @@ func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 			err = usagef("version takes no arguments")
 			break
 		}
-		fmt.Fprintf(stdout, "ego-dir %s\n", version)
+		fmt.Fprintf(stdout, "ego-dir %s\n", currentVersion())
 		return exitOK
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, usage)

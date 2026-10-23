@@ -36,7 +36,9 @@ install -m 0755 ego-dir_v0.0.1_darwin_arm64/ego-dir ~/.local/bin/   # or any dir
 go install github.com/Duara-Cortex/ego-dir/cmd/ego-dir@latest
 ```
 
-`ego-dir version` reports `dev` for this route; release archives and `make install` carry the version.
+`ego-dir version` reports the module version Go records in the binary: the tag you named
+(`@v0.0.1`), the tag `@latest` resolved to, or a pseudo-version for `@main` or a commit.
+Builds from a checkout report `dev` unless `VERSION` is set, as below.
 
 **From source:**
 
@@ -176,6 +178,7 @@ internal/graph      Ego-graph engine (Node, Edge, EgoGraph, BFS Builder)
 internal/render     Markdown + JSON renderers (deterministic)
 internal/lsp        LSP harness (JSON-RPC 2.0 framing, client, server registry)
 internal/lsppool    Warm language servers shared between MCP calls
+internal/lspsource  Maps LSP answers onto ego-graph nodes and edges (per-language rules)
 ```
 
 ## Build and test

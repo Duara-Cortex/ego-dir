@@ -536,3 +536,10 @@ func TestMCPModernClient(t *testing.T) {
 		t.Errorf("exit = %d, want 0", code)
 	}
 }
+
+// The server reports the version that `ego-dir version` prints.
+func TestMCPServerVersionMatchesCLI(t *testing.T) {
+	if got, want := mcpServer(mcpConfig{}, oneShot{}).Version, currentVersion(); got != want {
+		t.Errorf("serverInfo version = %q, want %q", got, want)
+	}
+}

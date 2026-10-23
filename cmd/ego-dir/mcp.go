@@ -39,7 +39,7 @@ func runMCP(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(stderr, "ego-dir %s: serving MCP on stdio for %s\n", version, cfg.root)
+	fmt.Fprintf(stderr, "ego-dir %s: serving MCP on stdio for %s\n", currentVersion(), cfg.root)
 	var srv servers = oneShot{}
 	if cfg.idle > 0 {
 		pool := lsppool.New(lsppool.Options{Idle: cfg.idle, Max: mcp.DefaultMaxConcurrent, StartTimeout: cfg.timeout, Log: stderr})
@@ -82,7 +82,7 @@ func parseMCPFlags(args []string) (mcpConfig, error) {
 }
 
 func mcpServer(cfg mcpConfig, srv servers) *mcp.Server {
-	s := &mcp.Server{Name: "ego-dir", Version: version}
+	s := &mcp.Server{Name: "ego-dir", Version: currentVersion()}
 	for _, cmd := range []string{"inspect_ego", "resolve_definition", "find_references"} {
 		s.Tools = append(s.Tools, mcp.Tool{
 			Name:        cmd,
