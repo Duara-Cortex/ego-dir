@@ -122,6 +122,25 @@ func (fs *fakeServer) await(method string, n int, match func(lspfake.Message) bo
 	}
 }
 
+// awaitRegistered waits until the client has answered the server's
+// registration for watched files. The server registers after initialised,
+// so a call made before the answer arrives finds a server that does not
+// watch, and the pool restarts it rather than telling it of changes. The
+// client records a registration before it answers.
+func (fs *fakeServer) awaitRegistered(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, m := range fs.Received() {
+			if m.Method == "" && len(m.ID) > 0 {
+				return
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("the client never answered the registration for watched files")
+}
+
 // roundTrip makes a request through s and waits for the answer: the
 // server handles messages in order, so everything sent before is recorded.
 func roundTrip(t *testing.T, s *lsppool.Session, uri string) {
@@ -482,6 +501,7 @@ func TestEditOnDiskIsSentToTheServer(t *testing.T) {
 		t.Fatalf("callers = %v", got)
 	}
 	s.Release(ctx5(t), nil)
+	f.started()[0].awaitRegistered(t)
 
 	appendSummary(t, root)
 	s = acquire(t, p, gopls, root)
@@ -762,6 +782,7 @@ func TestChangesUnderASymlinkedRootAreSentByBothNames(t *testing.T) {
 	f := &fakes{watch: true}
 	p := newPool(t, f, lsppool.Options{})
 	acquire(t, p, gopls, link).Release(ctx5(t), nil)
+	f.started()[0].awaitRegistered(t)
 	appendSummary(t, link)
 	acquire(t, p, gopls, link).Release(ctx5(t), nil)
 	changes := f.started()[0].await("workspace/didChangeWatchedFiles", 1, nil)
