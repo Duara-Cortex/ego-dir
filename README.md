@@ -59,15 +59,41 @@ Then install the language server for your language (see below).
 
 The server is chosen by file extension. Use `--server "<cmd> <args>"` to override it.
 
-| Extension            | Default command                        |
-|----------------------|----------------------------------------|
-| `.go`                | `gopls`                                |
-| `.py`                | `pyright-langserver --stdio`           |
-| `.rs`                | `rust-analyzer`                        |
-| `.ts .tsx .js .jsx`  | `typescript-language-server --stdio`   |
-| `.php`               | `intelephense --stdio`                 |
+| Extension            | Default command                        | Validated against |
+|----------------------|----------------------------------------|-------------------|
+| `.go`                | `gopls`                                | gopls v0.23.0     |
+| `.py`                | `pyright-langserver --stdio`           | pyright 1.1.414   |
+| `.rs`                | `rust-analyzer`                        | not yet           |
+| `.ts .tsx .js .jsx`  | `typescript-language-server --stdio`   | not yet           |
+| `.php`               | `intelephense --stdio`                 | not yet           |
 
-The language server must be installed. Ego-dir does not install it.
+The language server must be installed. Ego-dir does not install it. A validated server is
+tested in CI at that version, and the output is checked against golden files. Other versions
+usually work, but their output may differ. A server that is not validated gets ego-dir's
+generic rules and has never been run.
+
+**Python (pyright).** Install it with `npm install --global pyright@1.1.414`.
+- **No `implements` edges.** pyright does not answer `textDocument/implementation`, so
+  `Rect.area` is not linked to the `Shape.area` it overrides. A call through the base class
+  (`s.area()` where `s: Shape`) is a call to `Shape.area` alone.
+- **Constructors.** A call to a class (`Rect(w, h)`) is an `instantiates` edge, not a call.
+- **Modules.** Every `.py` file is a module, named by its dotted path from the nearest directory
+  above it without an `__init__.py` (`report/report.py` is `report.report`). The position of the
+  module ego is the first line of the module docstring; a file without one cannot be chosen as a
+  module ego, though it is still a module in `imports` and `contains`.
+- **Imports.** Read from the source, as `import a.b` (module `a.b`) and `from a import b`
+  (`a.b` when that is a module of the workspace, otherwise `a`). Relative imports are resolved
+  against the package. A module outside the workspace (the standard library, installed packages)
+  is known by its path alone.
+- **Uses in other files.** pyright finds uses only in the files it has open, until it has
+  analysed the whole workspace in the background. So before asking for references or callers,
+  ego-dir opens the workspace files that import the symbol's module, directly or through a
+  package's `__init__.py`. A use reached only through a dynamic import is not found.
+- **Members.** A class contains its methods and attributes (`self.w` is the field `Rect.w`). A
+  function's parameters and local variables are not members.
+- **Outside the workspace.** Files under `site-packages`, `dist-packages`, `node_modules`,
+  `__pycache__` and hidden directories such as `.venv` are left out, even when they are under
+  `--root`. So are pyright's bundled stubs and the interpreter's library.
 
 ## Usage 
 
@@ -187,7 +213,7 @@ internal/lspsource  Maps LSP answers onto ego-graph nodes and edges (per-languag
 go build ./...
 go vet ./...
 go test ./...                       # unit tests, offline, using an in-process fake LSP server
-go test -tags integration ./...     # also runs real-server tests (skipped if gopls is missing)
+go test -tags integration ./...     # also runs real-server tests (each skipped if gopls or pyright-langserver is missing)
 
 make build                          # build dist/ego-dir for this machine (VERSION=v0.0.1 make build to stamp a version)
 make install                        # install ego-dir into ~/.local/bin (override with INSTALL_DIR=...)

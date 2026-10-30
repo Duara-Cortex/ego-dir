@@ -36,13 +36,14 @@ jobs:
         run: make test
 
   integration:
-    name: Integration Tests (gopls)
+    name: Integration Tests (gopls, pyright)
     runs-on: ubuntu-latest
-    # Also builds gopls from source.
+    # Also builds gopls from source and installs pyright.
     timeout-minutes: 12
     env:
-      # The golden files and lspfake follow this gopls's output. Bump it on purpose.
+      # The golden files and lspfake follow these servers' output. Bump them on purpose.
       GOPLS_VERSION: v0.23.0
+      PYRIGHT_VERSION: 1.1.414
     steps:
       - name: Checkout Code
         uses: actions/checkout@v5
@@ -62,6 +63,21 @@ jobs:
       - name: Check gopls
         run: gopls version
 
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Install pyright
+        run: npm install --global "pyright@${PYRIGHT_VERSION}"
+
+      # pyright-langserver has no --version; the pyright command of the same
+      # package does. Fails the job if the server is missing or not the pinned one.
+      - name: Check pyright
+        run: |
+          command -v pyright-langserver
+          pyright --version | tee /dev/stderr | grep -qx "pyright ${PYRIGHT_VERSION}"
+
       # An explicit `shell: bash` runs with pipefail, so a test failure is not hidden by tee.
       - name: Run Integration Tests
         shell: bash
@@ -69,6 +85,10 @@ jobs:
           GOFLAGS=-v make integration 2>&1 | tee integration.log
           if grep -q 'gopls not on PATH' integration.log; then
             echo "::error::gopls integration tests were skipped"
+            exit 1
+          fi
+          if grep -q 'pyright-langserver not on PATH' integration.log; then
+            echo "::error::pyright integration tests were skipped"
             exit 1
           fi
 

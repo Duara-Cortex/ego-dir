@@ -48,8 +48,8 @@ type jsonEdge struct {
 // JSON writes g in the ego-dir/v1 schema: ids are "file:line:col" of the
 // symbol's name relative to root, and every node has a role (ego,
 // upstream, downstream, both or related). A module has the id
-// "module:<path>", no range, and a file (its directory) only when it is
-// in the workspace.
+// "module:<path>", no range, and a file (its directory, or its file for a
+// language whose modules are files) only when it is in the workspace.
 func JSON(w io.Writer, g *graph.EgoGraph, root string) error {
 	v := newView(g, root)
 	out := jsonGraph{

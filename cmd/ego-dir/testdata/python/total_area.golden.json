@@ -1,0 +1,71 @@
+{
+  "schema": "ego-dir/v1",
+  "ego": "shapes.py:31:5",
+  "depth": 2,
+  "nodes": [
+    {
+      "id": "shapes.py:31:5",
+      "name": "total_area",
+      "kind": "function",
+      "file": "shapes.py",
+      "range": {
+        "start_line": 31,
+        "start_col": 1,
+        "end_line": 36,
+        "end_col": 17
+      },
+      "hop": 0,
+      "role": "ego",
+      "signature": "def total_area(shapes: list[Shape]) -> float",
+      "doc": "Sum the area of every shape.",
+      "body": "def total_area(shapes: list[Shape]) -> float:\n    \"\"\"Sum the area of every shape.\"\"\"\n    total = 0.0\n    for s in shapes:\n        total += s.area()\n    return total"
+    },
+    {
+      "id": "shapes.py:10:9",
+      "name": "area",
+      "qualified": "Shape.area",
+      "kind": "method",
+      "file": "shapes.py",
+      "range": {
+        "start_line": 9,
+        "start_col": 5,
+        "end_line": 11,
+        "end_col": 39
+      },
+      "hop": 1,
+      "role": "downstream",
+      "signature": "def area(self: Self@Shape) -> float",
+      "doc": "Return the shape's area."
+    },
+    {
+      "id": "shapes.py:39:5",
+      "name": "report",
+      "kind": "function",
+      "file": "shapes.py",
+      "range": {
+        "start_line": 39,
+        "start_col": 1,
+        "end_line": 41,
+        "end_col": 56
+      },
+      "hop": 1,
+      "role": "upstream",
+      "signature": "def report() -> float",
+      "doc": "Return the total area of two rectangles."
+    }
+  ],
+  "edges": [
+    {
+      "from": "shapes.py:31:5",
+      "to": "shapes.py:10:9",
+      "kind": "calls",
+      "weight": 1
+    },
+    {
+      "from": "shapes.py:39:5",
+      "to": "shapes.py:31:5",
+      "kind": "calls",
+      "weight": 1
+    }
+  ]
+}

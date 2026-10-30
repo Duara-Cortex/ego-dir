@@ -2,30 +2,43 @@
 // server, mapping LSP answers onto ego-graph nodes and edges.
 //
 // Edge derivation:
-//   - calls: call hierarchy (incoming/outgoing); weight = call sites.
+//   - calls: call hierarchy (incoming/outgoing); weight = distinct call
+//     sites. A call to a class is an instantiates edge instead.
 //   - implements: textDocument/implementation, oriented concrete ->
 //     interface using the document outline.
-//   - instantiates: textDocument/typeDefinition of the symbol.
+//   - instantiates: textDocument/typeDefinition of the symbol, and calls
+//     to a class (Python's Rect(w, h)).
 //   - references: textDocument/references, grouped by enclosing symbol.
 //   - contains: the document outline, from a module to its top-level
 //     symbols and from a type to its members. Members a language declares
 //     outside their type (Go methods) are matched by the Language's Owner.
 //   - imports: from a module to the modules it imports, read by the
-//     Language (Go: go/parser), with weight = importing files.
+//     Language (Go: go/parser; Python: a scanner of import statements),
+//     with weight = importing files.
 //
-// What differs between programming languages (outline names, hover
-// decorations, modules) comes from a Language, chosen by file extension.
+// What differs between programming languages (outline names, which outline
+// entries are symbols, hover decorations, modules, the files a server must
+// have open to find every use) comes from a Language, chosen by file
+// extension. Go and Python have their own; other languages get the
+// generic parts. Before asking for references or callers, the source opens
+// the Language's companions of the symbol's file (Python: the files that
+// import its module), as pyright finds uses only in open files until it
+// has analysed the workspace.
 //
 // A module node has no position. The ego is a module when the position is
-// on the module's name in a file's module declaration ("package report").
-// Only contains (out) and imports (out) edges leave a module; no request
-// is sent to the server about one other than hover on that name.
+// on the module's header: its name in a file's module declaration
+// ("package report") or, in Python, the first line of its docstring. Only
+// contains (out) and imports (out) edges leave a module; no request is
+// sent to the server about one other than hover on that name, and none
+// when the Language describes the module itself.
 //
 // An error the server returns for a neighbour request (it does not support
 // it, or it does not apply to the symbol) counts as no neighbours.
 // Neighbours declared outside the workspace root (the standard library, the
-// module cache) are dropped: their paths depend on the machine. A module
-// outside the root is kept, identified by its path alone.
+// module cache) are dropped: their paths depend on the machine. So are
+// those in installed packages, caches or hidden directories below the root
+// (site-packages, .venv). A module outside the root is kept, identified by
+// its path alone.
 package lspsource
 
 import (
@@ -66,13 +79,15 @@ type Source struct {
 	files   map[string]*file         // by URI
 	loading map[string]chan struct{} // closed when the URI's load ends
 	nodes   map[graph.NodeID]*info   // every node handed out
+	opened  map[string]bool          // files whose companions are open, by URI
 }
 
 var _ graph.SymbolSource = (*Source)(nil)
 
 // New returns a source that asks c about the workspace at root.
 func New(c Client, root string) *Source {
-	s := &Source{c: c, root: root, files: map[string]*file{}, loading: map[string]chan struct{}{}, nodes: map[graph.NodeID]*info{}}
+	s := &Source{c: c, root: root, files: map[string]*file{}, loading: map[string]chan struct{}{}, nodes: map[graph.NodeID]*info{},
+		opened: map[string]bool{}}
 	if root != "" {
 		if abs, err := filepath.Abs(root); err == nil {
 			s.roots = append(s.roots, abs)
@@ -84,7 +99,9 @@ func New(c Client, root string) *Source {
 	return s
 }
 
-// inWorkspace reports whether uri is a file under the workspace root.
+// inWorkspace reports whether uri is a file under the workspace root, and
+// not in a directory below it that holds code the workspace does not own
+// (installed packages, a virtual environment, caches).
 func (s *Source) inWorkspace(uri string) bool {
 	if len(s.roots) == 0 {
 		return true
@@ -96,6 +113,12 @@ func (s *Source) inWorkspace(uri string) bool {
 	for _, root := range s.roots {
 		rel, err := filepath.Rel(root, path)
 		if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			dirs := strings.Split(filepath.ToSlash(rel), "/")
+			for _, d := range dirs[:len(dirs)-1] {
+				if outsideWorkspaceDir(d) {
+					return false
+				}
+			}
 			return true
 		}
 	}
@@ -128,6 +151,9 @@ type info struct {
 	abstract bool // an interface or interface method
 	module   *Module
 	lang     Language // the module's language
+	// callers and callees are the node's call hierarchy neighbours, both
+	// calls and instantiates, once asked for.
+	callers, callees *[]graph.Neighbor
 }
 
 // Resolve returns the symbol at pos: the callee when pos is a call site,
@@ -187,12 +213,17 @@ func (s *Source) Neighbors(ctx context.Context, n graph.Node, dir graph.Directio
 				nbrs, err = s.members(ctx, inf)
 			}
 		case graph.EdgeCalls:
-			nbrs, err = s.calls(ctx, inf, dir)
+			nbrs, err = s.calls(ctx, inf, dir, graph.EdgeCalls)
 		case graph.EdgeImplements:
 			nbrs, err = s.implements(ctx, inf, dir)
 		case graph.EdgeInstantiates:
 			if dir == graph.DirOut {
 				nbrs, err = s.instantiates(ctx, inf)
+			}
+			if err == nil {
+				var made []graph.Neighbor
+				made, err = s.calls(ctx, inf, dir, graph.EdgeInstantiates)
+				nbrs = append(nbrs, made...)
 			}
 		case graph.EdgeReferences:
 			if dir == graph.DirIn {
@@ -207,13 +238,58 @@ func (s *Source) Neighbors(ctx context.Context, n graph.Node, dir graph.Directio
 	return out, nil
 }
 
-func (s *Source) calls(ctx context.Context, inf *info, dir graph.Direction) ([]graph.Neighbor, error) {
+// calls returns the callers (dir in) or callees (dir out) of inf that are
+// edges of kind: a call to a class makes an instance of it, so it is an
+// instantiates edge, and any other call a calls edge. An edge's weight is
+// the number of distinct call sites. The server is asked once per node and
+// direction, whichever kind comes first.
+func (s *Source) calls(ctx context.Context, inf *info, dir graph.Direction, kind graph.EdgeKind) ([]graph.Neighbor, error) {
+	s.mu.Lock()
+	cached := inf.callees
+	if dir == graph.DirIn {
+		cached = inf.callers
+	}
+	s.mu.Unlock()
+	if cached == nil {
+		nbrs, err := s.askCalls(ctx, inf, dir)
+		if err != nil {
+			return nil, err
+		}
+		s.mu.Lock()
+		if dir == graph.DirIn {
+			inf.callers = &nbrs
+		} else {
+			inf.callees = &nbrs
+		}
+		s.mu.Unlock()
+		cached = &nbrs
+	}
+	var out []graph.Neighbor
+	for _, nb := range *cached {
+		if nb.Kind == kind {
+			out = append(out, nb)
+		}
+	}
+	return out, nil
+}
+
+// askCalls asks the server for the callers or callees of inf.
+func (s *Source) askCalls(ctx context.Context, inf *info, dir graph.Direction) ([]graph.Neighbor, error) {
 	item, err := s.callItem(ctx, inf)
 	if err != nil || item == nil {
 		return nil, err
 	}
+	edgeKind := func(callee graph.Node) graph.EdgeKind {
+		if callee.Kind == graph.KindClass {
+			return graph.EdgeInstantiates
+		}
+		return graph.EdgeCalls
+	}
 	var out []graph.Neighbor
 	if dir == graph.DirIn {
+		if err := s.openCompanions(ctx, inf.node.URI); err != nil {
+			return nil, err
+		}
 		calls, err := s.c.IncomingCalls(ctx, *item)
 		if err := hardError(err); err != nil {
 			return nil, err
@@ -226,7 +302,7 @@ func (s *Source) calls(ctx context.Context, inf *info, dir graph.Direction) ([]g
 			if err != nil {
 				return nil, err
 			}
-			out = append(out, graph.Neighbor{Node: nb.node, Kind: graph.EdgeCalls, Weight: len(c.FromRanges)})
+			out = append(out, graph.Neighbor{Node: nb.node, Kind: edgeKind(inf.node), Weight: distinct(c.FromRanges)})
 		}
 		return out, nil
 	}
@@ -242,9 +318,54 @@ func (s *Source) calls(ctx context.Context, inf *info, dir graph.Direction) ([]g
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, graph.Neighbor{Node: nb.node, Kind: graph.EdgeCalls, Weight: len(c.FromRanges)})
+		out = append(out, graph.Neighbor{Node: nb.node, Kind: edgeKind(nb.node), Weight: distinct(c.FromRanges)})
 	}
 	return out, nil
+}
+
+// distinct counts the different ranges in rs: a server may list one call
+// site more than once (pyright 1.1.414 lists s.area() twice among the
+// callers of Shape.area in testdata/python).
+func distinct(rs []lsp.Range) int {
+	seen := map[lsp.Range]bool{}
+	for _, r := range rs {
+		seen[r] = true
+	}
+	return len(seen)
+}
+
+// OpenCompanions opens, once, the files that the language of the file at
+// uri says the server needs open to find every use of what it declares.
+func (s *Source) OpenCompanions(ctx context.Context, uri string) error {
+	return s.openCompanions(ctx, uri)
+}
+
+func (s *Source) openCompanions(ctx context.Context, uri string) error {
+	s.mu.Lock()
+	done := s.opened[uri]
+	s.mu.Unlock()
+	if done || len(s.roots) == 0 {
+		return nil
+	}
+	path, err := lsp.URIToPath(uri)
+	if err != nil {
+		return nil
+	}
+	others, err := languageOf(uri).Companions(path, s.roots[0])
+	if err != nil {
+		return err
+	}
+	for _, other := range others {
+		if u := lsp.FileURI(other); s.inWorkspace(u) {
+			if _, err := s.load(ctx, u); err != nil {
+				return err
+			}
+		}
+	}
+	s.mu.Lock()
+	s.opened[uri] = true
+	s.mu.Unlock()
+	return nil
 }
 
 // callItem returns the node's call hierarchy item, preparing it once.
@@ -308,6 +429,9 @@ func (s *Source) located(ctx context.Context, inf *info, kind graph.EdgeKind,
 
 // references groups the uses of inf by the symbol that contains them.
 func (s *Source) references(ctx context.Context, inf *info) ([]graph.Neighbor, error) {
+	if err := s.openCompanions(ctx, inf.node.URI); err != nil {
+		return nil, err
+	}
 	locs, err := s.c.References(ctx, inf.node.URI, inf.sel.Start, false)
 	if err := hardError(err); err != nil {
 		return nil, err
@@ -411,7 +535,7 @@ func (s *Source) fromSymbol(ctx context.Context, f *file, sym symbol, item *lsp.
 			Selection: sel,
 			Signature: signature,
 			Doc:       doc,
-			Body:      f.text(sym.Range),
+			Body:      dedent(f.text(sym.Range), f.toGraph(sym.Range).StartCol-1),
 		},
 		sel:      sym.SelectionRange,
 		item:     item,
@@ -484,6 +608,10 @@ func (s *Source) open(ctx context.Context, uri string) (*file, error) {
 
 func (f *file) flatten(syms []lsp.DocumentSymbol, parent *lsp.DocumentSymbol) {
 	for _, sym := range syms {
+		sym, keep := f.lang.OutlineEntry(sym, parent)
+		if !keep {
+			continue
+		}
 		entry := symbol{DocumentSymbol: sym}
 		entry.Children = nil
 		entry.Range.Start = f.lang.DeclarationStart(f.line(entry.Range.Start.Line), entry.Range.Start)
@@ -573,6 +701,28 @@ func hardError(err error) error {
 		return nil
 	}
 	return err
+}
+
+// dedent removes from every line of a declaration after its first the
+// indentation of the column it starts at (0-based, in runes), so a nested
+// method's body reads as if it were at the top level. A line indented less
+// is left as it is.
+func dedent(decl string, col int) string {
+	if col <= 0 {
+		return decl
+	}
+	lines := strings.Split(decl, "\n")
+	for i := 1; i < len(lines); i++ {
+		runes := []rune(lines[i])
+		n := 0
+		for n < col && n < len(runes) && (runes[n] == ' ' || runes[n] == '\t') {
+			n++
+		}
+		if n == col {
+			lines[i] = string(runes[n:])
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // declarationLine is the fallback signature: the first line of the

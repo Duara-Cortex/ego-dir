@@ -89,16 +89,18 @@ const (
 // CrashNote is what the helper writes to stderr before it crashes.
 const CrashNote = "lspfake: crashing as asked"
 
-// RunHelperIfRequested serves the Sample scenario on stdin/stdout and exits
-// when EnvHelper is set to "sample". Call it first in TestMain. A test can
-// then start os.Args[0] (with the variable set) as a real language-server
-// process without needing gopls installed.
+// RunHelperIfRequested serves a scenario on stdin/stdout and exits when
+// EnvHelper names one: "sample" for Sample, "python" for Python. Call it
+// first in TestMain. A test can then start os.Args[0] (with the variable
+// set) as a real language-server process without needing gopls or pyright
+// installed.
 func RunHelperIfRequested() {
-	if os.Getenv(EnvHelper) != "sample" {
+	scenario := map[string]func(*Server){"sample": Sample, "python": Python}[os.Getenv(EnvHelper)]
+	if scenario == nil {
 		return
 	}
 	s := New()
-	Sample(s)
+	scenario(s)
 	for env, d := range map[string]*time.Duration{EnvLatency: &s.Latency, EnvInitialiseDelay: &s.InitialiseDelay} {
 		if v := os.Getenv(env); v != "" {
 			var err error

@@ -100,7 +100,7 @@ func (v *view) role(id graph.NodeID) string {
 	}
 }
 
-// file returns the node's file (a module's directory) relative to the
+// file returns the node's file (a module's directory or file) relative to the
 // root, with / separators; "" when it has none.
 func (v *view) file(n graph.Node) string {
 	if n.URI == "" {
