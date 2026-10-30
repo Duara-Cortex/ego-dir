@@ -17,7 +17,7 @@ func (f *file) moduleHeaderAt(pos lsp.Position) (Module, bool) {
 		return Module{}, false
 	}
 	for _, mf := range m.Files {
-		if filepath.Clean(mf.Path) == filepath.Clean(f.path) && contains(mf.Header, pos) {
+		if filepath.Clean(mf.Path) == filepath.Clean(f.path) && mf.Header != (lsp.Range{}) && contains(mf.Header, pos) {
 			return m, true
 		}
 	}
@@ -25,9 +25,10 @@ func (f *file) moduleHeaderAt(pos lsp.Position) (Module, bool) {
 }
 
 // moduleNode builds (once) the node of module m. A module in the
-// workspace points at its directory and takes its signature and doc from
-// hover on its name in its first file. Any other module is known by its
-// path alone and has no members or imports.
+// workspace points at its directory (or its file, for a module that is
+// one) and takes its signature and doc from its language when that
+// supplies them, else from hover on its name in its first file. Any other
+// module is known by its path alone and has no members or imports.
 func (s *Source) moduleNode(ctx context.Context, m Module, lang Language) (*info, error) {
 	id := graph.NewModuleID(m.Path)
 	s.mu.Lock()
@@ -38,7 +39,10 @@ func (s *Source) moduleNode(ctx context.Context, m Module, lang Language) (*info
 	s.mu.Unlock()
 
 	node := graph.Node{ID: id, Name: m.Name, Qualified: m.Path, Kind: graph.KindModule}
-	if m.Dir != "" && len(m.Files) > 0 && s.inWorkspace(lsp.FileURI(m.Dir)) {
+	if m.File != "" && s.inWorkspace(lsp.FileURI(m.File)) {
+		node.URI = lsp.FileURI(m.File)
+		node.Signature, node.Doc = m.Signature, m.Doc
+	} else if m.Dir != "" && len(m.Files) > 0 && s.inWorkspace(lsp.FileURI(m.Dir)) {
 		node.URI = lsp.FileURI(m.Dir)
 		first := m.Files[0]
 		uri := lsp.FileURI(first.Path)
@@ -51,7 +55,7 @@ func (s *Source) moduleNode(ctx context.Context, m Module, lang Language) (*info
 		}
 		node.Signature, node.Doc = lang.ParseHover(hover)
 	} else {
-		m.Dir, m.Files = "", nil
+		m.Dir, m.Files, m.File = "", nil, ""
 	}
 	inf := &info{node: node, module: &m, lang: lang}
 	s.mu.Lock()

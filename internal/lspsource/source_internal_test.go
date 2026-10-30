@@ -102,11 +102,46 @@ func TestInWorkspace(t *testing.T) {
 		{"no root keeps everything", "", "file:///usr/local/go/src/fmt/errors.go", true},
 		{"root through a symlink, server reports the real path", link, lsp.FileURI(filepath.Join(real, "a.go")), true},
 		{"root through a symlink, path through it", link, lsp.FileURI(filepath.Join(link, "a.go")), true},
+		{"virtual environment under the root", root, lsp.FileURI(filepath.Join(root, ".venv", "lib", "python3.12", "site-packages", "x", "y.py")), false},
+		{"installed packages under the root", root, lsp.FileURI(filepath.Join(root, "vendor", "site-packages", "x.py")), false},
+		{"Debian's installed packages", root, lsp.FileURI(filepath.Join(root, "lib", "dist-packages", "x.py")), false},
+		{"node_modules under the root", root, lsp.FileURI(filepath.Join(root, "node_modules", "x", "i.js")), false},
+		{"hidden file in the root", root, lsp.FileURI(filepath.Join(root, ".hidden.py")), true},
 	}
 	for _, tc := range tests {
 		s := New(nil, tc.root)
 		if got := s.inWorkspace(tc.uri); got != tc.want {
 			t.Errorf("%s: inWorkspace(%q) with root %q = %v, want %v", tc.name, tc.uri, tc.root, got, tc.want)
+		}
+	}
+}
+
+func TestDedent(t *testing.T) {
+	tests := []struct {
+		decl string
+		col  int
+		want string
+	}{
+		{"def area(self) -> float:\n        \"\"\"Doc.\"\"\"\n        return 1", 4, "def area(self) -> float:\n    \"\"\"Doc.\"\"\"\n    return 1"},
+		{"func F() {\n\treturn\n}", 0, "func F() {\n\treturn\n}"},
+		{"Area() float64", 1, "Area() float64"},
+		{"def f():\n  x = 1\n\n    y = 2", 4, "def f():\n  x = 1\n\ny = 2"}, // a line indented less stays
+	}
+	for _, tc := range tests {
+		if got := dedent(tc.decl, tc.col); got != tc.want {
+			t.Errorf("dedent(%q, %d) = %q, want %q", tc.decl, tc.col, got, tc.want)
+		}
+	}
+}
+
+func TestDistinct(t *testing.T) {
+	a, b := lsp.Range{End: lsp.Position{Character: 4}}, lsp.Range{Start: lsp.Position{Line: 1}}
+	for _, tc := range []struct {
+		rs   []lsp.Range
+		want int
+	}{{nil, 0}, {[]lsp.Range{a}, 1}, {[]lsp.Range{a, a}, 1}, {[]lsp.Range{a, b, a}, 2}} {
+		if got := distinct(tc.rs); got != tc.want {
+			t.Errorf("distinct(%v) = %d, want %d", tc.rs, got, tc.want)
 		}
 	}
 }

@@ -62,16 +62,60 @@ the LSP client be tested against an in-process fake server.
 programming language. What differs between languages lives in `internal/lspsource`, behind
 the `Language` interface, chosen by file extension:
 
-| Part           | Question it answers                                              | Generic                       | Go                                              |
-|----------------|------------------------------------------------------------------|-------------------------------|-------------------------------------------------|
-| `Naming`       | Short and qualified name of an outline entry; the type that owns a member declared outside it | names as given; members nested in the outline | `(T).M` is `M`, qualified `T.M`, owned by `T` |
-| `Declarations` | Where a declaration really starts                                | as the server says            | widened over the `type` keyword                 |
-| `HoverReader`  | Signature and doc from hover Markdown                            | first code block, then prose  | also drops gopls layout comments, method sets, links and package facts |
-| `Modules`      | The module a file belongs to, its files and header, what it imports | none                       | the package in the file's directory (`go/parser`, `go.mod`) |
+| Part           | Question it answers                                              | Generic                       | Go                                              | Python (pyright)                                |
+|----------------|------------------------------------------------------------------|-------------------------------|-------------------------------------------------|-------------------------------------------------|
+| `Naming`       | Short and qualified name of an outline entry; the type that owns a member declared outside it | names as given; members nested in the outline | `(T).M` is `M`, qualified `T.M`, owned by `T` | generic |
+| `Declarations` | Where a declaration really starts                                | as the server says            | widened over the `type` keyword                 | generic: pyright starts at `def`, `class` or the first decorator |
+| `HoverReader`  | Signature and doc from hover Markdown                            | first code block, then prose  | also drops gopls layout comments, method sets, links and package facts | drops the `(function) ` kind, joins a signature laid out over lines, takes the rule straight after the code block as a break, undoes the Markdown escaping of the docstring |
+| `Modules`      | The module a file belongs to, its files and header, what it imports | none                       | the package in the file's directory (`go/parser`, `go.mod`) | the file, by dotted path; header and doc from its docstring; imports read by a scanner |
+| `Outline`      | Which outline entries are symbols, and of what kind              | all, as given                 | generic                                         | drops a function's parameters and locals; a class's variables are fields |
+| `Companions`   | Which files the server must have open to find every use of what a file declares | none           | none                                            | the workspace files that import its module, directly or through a package's `__init__.py` |
 
 A language is a struct composed of one implementation of each part, so a new language
 reuses the generic parts that fit (an object-oriented language nests members in the
 outline, as the generic `Naming` expects) and supplies only what differs.
+
+What each validated server supports, and so which edges a language gets:
+
+| Edge kind      | Go (gopls v0.23.0) | Python (pyright 1.1.414) |
+|----------------|--------------------|--------------------------|
+| `calls`        | yes, including callers through an interface method | yes; a call through a base class (`s.area()`, `s: Shape`) reaches the base method only |
+| `implements`   | yes                | no: pyright does not answer `textDocument/implementation` (`-32601`) |
+| `instantiates` | yes, from `typeDefinition` of a function's result | yes, from calls to a class; `typeDefinition` of a function is the function itself |
+| `imports`      | yes                | yes                      |
+| `contains`     | yes                | yes                      |
+| `references`   | yes                | yes, once the files that may use the symbol are open (`Companions`) |
+
+### Python modules
+
+Every `.py` file is a module. Its path is dotted from the import root, the nearest directory
+above the file without an `__init__.py`: with `report/__init__.py` present, `report/report.py`
+is `report.report` and `report/__init__.py` is `report`. A module node points at its file, not
+its directory. Python has no module declaration, so the header (the position that makes the
+module the ego) is the first line of the module docstring; a file without one has no header.
+pyright answers nothing about a docstring, so the signature (`module report.report`) and the
+doc (the docstring, cleaned as `inspect.cleandoc` does) come from the file, and hover is not
+asked.
+
+Imports are read by a scanner that knows comments, strings (including triple-quoted and
+prefixed ones), brackets, `;` and backslash continuations, but does not parse Python:
+
+- `import a.b as c, d` imports `a.b` and `d`.
+- `from a import b` imports `a.b` when that is a module under the import root, otherwise `a`;
+  `from a import *` imports `a`.
+- `from . import b` and `from ..a import b` are resolved against the file's package. One that
+  climbs above the import root is left out.
+- Import statements anywhere count, including those under `if TYPE_CHECKING:` or in a function.
+- A module under the import root is read from disk. Any other (the standard library, installed
+  packages) is known by its path alone, so no machine-dependent location appears.
+
+pyright finds uses (references, callers) only in the files it has open until it has analysed
+the workspace in the background. With `window.workDoneProgress` declared, it reports progress
+only per request ("Finding references"), not for that analysis; its own `pyright/beginProgress`
+notifications were not evaluated as a signal. A fixed wait is not deterministic. So before the first references or incoming-calls request about a file's
+symbols, the source opens that file's companions: the Python files under the root that import
+its module, plus those that import a package whose `__init__.py` imports it, and so on. Finding
+them reads only import statements. The result is what pyright gives with every file open.
 
 ## MCP server
 
@@ -304,18 +348,19 @@ type EgoGraph struct {
 
 | Edge kind      | Direction   | LSP source                                                       | Notes                                   |
 |----------------|-------------|------------------------------------------------------------------|-----------------------------------------|
-| `calls`        | caller to callee | `textDocument/prepareCallHierarchy`, then `callHierarchy/incomingCalls` and `callHierarchy/outgoingCalls` | Weight = number of `fromRanges`. |
+| `calls`        | caller to callee | `textDocument/prepareCallHierarchy`, then `callHierarchy/incomingCalls` and `callHierarchy/outgoingCalls` | Weight = number of distinct `fromRanges` (pyright 1.1.414 lists the one call site of `s.area()` twice among the callers of `Shape.area`). A call to a class is an `instantiates` edge instead. |
 | `implements`   | concrete to interface | `textDocument/implementation` on the type or method | Orientation from the outline: an interface, or a method inside one, is the target. |
-| `instantiates` | user to type | `textDocument/typeDefinition` on the symbol's name (e.g. a constructor's result type) | Best-effort; depends on server support. |
-| `references`   | referrer to symbol | `textDocument/references` (excluding the declaration), grouped by enclosing symbol | Fallback when call hierarchy is unsupported. |
-| `imports`      | module to module | Read by the `Language` from the module's files (Go: the import declarations, with `go/parser`) | Weight = number of files that import it. Only outgoing: who imports a module is not derived. |
+| `instantiates` | user to type | `textDocument/typeDefinition` on the symbol's name (e.g. a constructor's result type), and call hierarchy where the callee is a class (`Rect(w, h)`) | Best-effort; depends on server support. The calls are found both ways, so a class has its instantiators upstream. |
+| `references`   | referrer to symbol | `textDocument/references` (excluding the declaration), grouped by enclosing symbol | Fallback when call hierarchy is unsupported. The language's companions are opened first. |
+| `imports`      | module to module | Read by the `Language` from the module's files (Go: the import declarations, with `go/parser`; Python: the import statements, with a scanner) | Weight = number of files that import it (always 1 for Python). Only outgoing: who imports a module is not derived. |
 | `contains`     | parent to member | `textDocument/documentSymbol` (the outline), plus the `Language`'s owner of members declared outside their type | A module contains its top-level symbols; a type its fields and methods (Go methods are matched by receiver). |
 
 A **module** is the unit code imports: a Go package, a Python module, a Rust crate. A module
 node has no position. Its id is `module:<path>`, where the path is what importers write, for
-example `module:example.com/sample/report` or `module:fmt`. A module in the workspace keeps
-its directory as its URI, and its signature and doc come from hover on its name in its first
-file (`package report`). Any other module (the standard library, the module cache) is known
+example `module:example.com/sample/report`, `module:fmt` or `module:report.report`. A module in
+the workspace keeps its directory (or, for a language whose modules are files, its file) as its
+URI, and its signature and doc come from hover on its name in its first file (`package report`),
+unless its language supplies them (Python: from the docstring). Any other module (the standard library, the module cache) is known
 by its path alone: no URI, no hover, no members, no imports. The ego is a module when the
 position is on its name in a file's module declaration. Only `contains` and `imports` leave
 a module, and no request about a module is sent to the server except that hover. `find_references`
@@ -331,14 +376,20 @@ range is widened to take in the `type` keyword, which gopls leaves out.
 A request the server does not support counts as "no edges", not as an error.
 
 Neighbours declared outside `--root` (the standard library, the module cache) are dropped,
-along with their edges. For example, gopls answers `typeDefinition` on a function with its
+along with their edges, and so are those in a directory below the root that holds code the
+workspace does not own: `site-packages`, `dist-packages`, `node_modules`, `__pycache__` and
+hidden directories (`.venv`, `.git`). For example, gopls answers `typeDefinition` on a function with its
 result type, which for `float64` or `error` is in `$GOROOT`. Those paths depend on the
 machine, and the files are not part of the workspace. The ego itself can still be outside
 the root.
 
 `textDocument/hover` supplies the signature (its first code block) and the doc (the prose
 after it). gopls decorations are removed: memory-layout comments (`// size=…, class=…,
-offset=…`), horizontal rules, the method-set code block and the pkg.go.dev link.
+offset=…`), horizontal rules, the method-set code block and the pkg.go.dev link. pyright's
+are removed too: the kind in parentheses (`(function) `), the layout of a signature over
+several lines, the rule after the code block and the escaping of the docstring (`new\_rect`,
+`&nbsp;`, `-&gt;`). A declaration's body loses the indentation of the column it starts at, so
+a method reads as if it were at the top level.
 
 ## Traversal rules
 
@@ -409,7 +460,7 @@ dependencies* its `instantiates`/`imports` edges. A module is shown by its path 
 shows `file:line`. In JSON, every node has a
 `role` (`ego`, `upstream`, `downstream`, `both`, or `related` for a node joined to the graph on neither side of the ego), and ids are `file:line:col` relative to
 `--root`. A module's id is `module:<path>`; it has no `range`, and a `file` (its directory,
-`.` for the root) only when it is in the workspace.
+`.` for the root, or its file for a Python module) only when it is in the workspace.
 
 ## Exit codes
 
@@ -435,7 +486,7 @@ fails. Errors in tool calls never end it.
 | MCP tools    | `ego-dir mcp` in-process against the fake server: tool text equals the CLI's output and the golden file; confinement; errors as `isError` |
 | Graph, parallel | The parallel result equals the serial one across depths, directions and edge kinds; the bound holds; the first error cancels the rest |
 | Pool         | In-process fake servers over pipes, and the fake as a process: lazy start, reuse, idle shutdown, the cap, cancellation that keeps the server, shared and counted documents, changed files sent or a restart, crashes, shutdown on close |
-| Integration  | `//go:build integration`, real `gopls` on `testdata/sample`, skipped when gopls is missing. Includes what a warm gopls needs to see an edit to a file that is not open, and an edit between two MCP calls |
+| Integration  | `//go:build integration`, real `gopls` on `testdata/sample` and real `pyright-langserver` on `testdata/python`, each skipped when its server is missing (CI fails if either is skipped). The graphs equal the fake's and the CLI output equals the golden files. Includes what a warm gopls needs to see an edit to a file that is not open, and an edit between two MCP calls |
 
 ### Pending acceptance tests
 
@@ -449,12 +500,20 @@ Shared fixtures, which run today:
 - `testdata/sample`: a tiny Go module with a known call graph (an interface, an
   implementation, a constructor and two callers) in `shapes.go`, and a second package,
   `report/report.go`, that imports it and two standard-library packages.
+- `testdata/python`: the same shapes in Python, an abstract `Shape` (an ABC with an
+  `@abstractmethod`), `Rect`, `new_rect`, `total_area` and `report` in `shapes.py`, and a
+  package, `report/`, whose `report.py` imports `shapes` and the standard library's `string`.
+  `pyrightconfig.json` pins the Python version pyright checks against.
 - `internal/lsp/lspfake`: a scripted LSP server with its own framing code, independent of
-  the client. Its `Sample` scenario answers like gopls v0.23 for `testdata/sample`, computing
-  every position from the files themselves. Like gopls, it reads the files once and then
+  the client. Its `Sample` scenario answers like gopls v0.23 for `testdata/sample`, and its
+  `Python` scenario like pyright 1.1.414 for `testdata/python` (with references and callers
+  only from open files, as pyright gives them before it has analysed the workspace), each
+  computing every position from the files themselves. The Python CLI golden files are in
+  `cmd/ego-dir/testdata/python`; `go test ./cmd/ego-dir -run TestPythonMatchesGoldens -update`
+  rewrites them from the fake. Like gopls, it reads the files once and then
   learns of edits only from `didOpen`, `didChange`, `didClose` and
   `workspace/didChangeWatchedFiles`, and registers for the last when the client allows it.
-  Test binaries re-run themselves as this server (via `EGO_DIR_LSPFAKE=sample`), which tests
+  Test binaries re-run themselves as this server (via `EGO_DIR_LSPFAKE=sample` or `=python`), which tests
   process spawning and the CLI end to end without gopls. More variables script it further:
   per-request latency, an initialise delay, a crash on demand and a log of its starts and
   clean exits.

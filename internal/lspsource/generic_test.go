@@ -21,8 +21,8 @@ import (
 
 func TestGenericLanguageNestsMembers(t *testing.T) {
 	root := t.TempDir()
-	path := filepath.Join(root, "app.py")
-	if err := os.WriteFile(path, []byte("class C:\n    def m(self):\n        pass\n"), 0o644); err != nil {
+	path := filepath.Join(root, "app.ts")
+	if err := os.WriteFile(path, []byte("class C {\n    get m() {\n        return 0\n    }\n}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	uri := lsp.FileURI(path)

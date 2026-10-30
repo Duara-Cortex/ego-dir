@@ -17,6 +17,8 @@ type Language interface {
 	Declarations
 	HoverReader
 	Modules
+	Outline
+	Companions
 }
 
 // Naming reads symbol names from the document outline.
@@ -28,6 +30,22 @@ type Naming interface {
 	// of, for languages that declare members outside their type, and
 	// returns "" otherwise. Members nested in the outline need no owner.
 	Owner(name string) string
+}
+
+// Outline adjusts the entries of a document outline.
+type Outline interface {
+	// OutlineEntry returns the outline entry sym, nested in parent (nil at
+	// the top level), as the source should see it. keep is false to leave
+	// sym, and everything nested in it, out.
+	OutlineEntry(sym lsp.DocumentSymbol, parent *lsp.DocumentSymbol) (entry lsp.DocumentSymbol, keep bool)
+}
+
+// Companions names the files a server must have open before it can find
+// every use of what a file declares.
+type Companions interface {
+	// Companions returns the source files under root, other than path,
+	// that may use what the file at path declares.
+	Companions(path, root string) ([]string, error)
 }
 
 // Declarations corrects the declaration ranges a server reports.
@@ -60,11 +78,18 @@ type Module struct {
 	Name  string       // how its code refers to it, e.g. "report"
 	Dir   string       // absolute directory of its files; "" when not on disk
 	Files []ModuleFile // its source files, sorted by path
+	// File is the module's one source file, for a language whose modules
+	// are files; the module's node then points at it rather than at Dir.
+	File string
+	// Described is set when the language supplies Signature and Doc
+	// itself, so hover is not asked.
+	Described      bool
+	Signature, Doc string
 }
 
 // ModuleFile is one source file of a module. Header is the module's name
 // in the file's module declaration (a package clause, say), in protocol
-// coordinates.
+// coordinates; an empty Header means the file has none.
 type ModuleFile struct {
 	Path   string
 	Header lsp.Range
@@ -86,6 +111,8 @@ func languageOf(uri string) Language {
 	switch lsp.LanguageID(filepath.Base(path)) {
 	case "go":
 		return golang
+	case "python":
+		return python
 	default:
 		return generic
 	}
@@ -97,6 +124,8 @@ type genericLanguage struct {
 	asDeclared
 	markdownHover
 	noModules
+	asOutlined
+	noCompanions
 }
 
 var generic Language = genericLanguage{}
@@ -127,6 +156,18 @@ type noModules struct{}
 
 func (noModules) ModuleOf(string) (Module, bool, error) { return Module{}, false, nil }
 func (noModules) Imports(Module) ([]Import, error)      { return nil, nil }
+
+// asOutlined keeps the outline as the server gives it.
+type asOutlined struct{}
+
+func (asOutlined) OutlineEntry(sym lsp.DocumentSymbol, _ *lsp.DocumentSymbol) (lsp.DocumentSymbol, bool) {
+	return sym, true
+}
+
+// noCompanions needs no other file open: the server finds uses by itself.
+type noCompanions struct{}
+
+func (noCompanions) Companions(string, string) ([]string, error) { return nil, nil }
 
 // firstCodeBlock splits hover Markdown that opens with a fenced code block
 // into that block's code and the Markdown after it. Anything else is all

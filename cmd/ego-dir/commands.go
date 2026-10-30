@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/Duara-Cortex/ego-dir/internal/graph"
@@ -144,10 +145,25 @@ func findReferences(ctx context.Context, c lspsource.Client, src *lspsource.Sour
 	if at, err = lsp.EditorToPosition(lineAt(targetLines, at.Line), target.Selection.StartLine, target.Selection.StartCol); err != nil {
 		return err
 	}
+	if err := src.OpenCompanions(ctx, target.URI); err != nil {
+		return err
+	}
 	locs, err := c.References(ctx, target.URI, at, false)
 	if err != nil {
 		return err
 	}
+	// Servers order their answers differently (gopls by file, pyright by
+	// what it analysed first), so sort them.
+	sort.Slice(locs, func(i, j int) bool {
+		a, b := locs[i], locs[j]
+		if a.URI != b.URI {
+			return a.URI < b.URI
+		}
+		if a.Range.Start.Line != b.Range.Start.Line {
+			return a.Range.Start.Line < b.Range.Start.Line
+		}
+		return a.Range.Start.Character < b.Range.Start.Character
+	})
 	files := map[string][]string{target.URI: targetLines}
 	refs := make([]render.Reference, 0, len(locs))
 	for _, loc := range locs {

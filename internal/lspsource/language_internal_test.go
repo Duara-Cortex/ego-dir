@@ -10,7 +10,9 @@ func TestLanguageOf(t *testing.T) {
 	tests := map[string]Language{
 		"file:///w/shapes.go":    golang,
 		"file:///w/SHAPES.GO":    golang,
-		"file:///w/app.py":       generic,
+		"file:///w/app.py":       python,
+		"file:///w/APP.PY":       python,
+		"file:///w/app.ts":       generic,
 		"file:///w/README":       generic,
 		"untitled:Untitled-1.go": generic,
 	}

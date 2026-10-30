@@ -13,6 +13,8 @@ type goLanguage struct {
 	typeKeyword
 	goplsHover
 	goPackages
+	asOutlined
+	noCompanions
 }
 
 var golang Language = goLanguage{}
