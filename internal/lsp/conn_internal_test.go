@@ -175,3 +175,55 @@ func TestAnswerServerRequestUnknown(t *testing.T) {
 		t.Errorf("unknown request error = %v, want MethodNotFound", err)
 	}
 }
+
+// goneStream is a stream to a server that has gone, before the client has
+// read the end of it: writes fail at once, reads wait until it is closed.
+type goneStream struct {
+	closed chan struct{}
+	closes int
+}
+
+func (g *goneStream) Read([]byte) (int, error) {
+	<-g.closed
+	return 0, io.EOF
+}
+
+func (g *goneStream) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
+
+func (g *goneStream) Close() error {
+	if g.closes++; g.closes == 1 {
+		close(g.closed)
+	}
+	return nil
+}
+
+// A write that fails ends the connection there and then, so a pool sees
+// at once that the server has gone and replaces it.
+func TestFailedWriteClosesTheConnection(t *testing.T) {
+	for _, send := range []struct {
+		name string
+		do   func(*conn) error
+	}{
+		{"request", func(c *conn) error { return c.call(context.Background(), "textDocument/hover", nil, nil) }},
+		{"notification", func(c *conn) error { return c.notify("textDocument/didOpen", nil) }},
+	} {
+		t.Run(send.name, func(t *testing.T) {
+			g := &goneStream{closed: make(chan struct{})}
+			c := newConn(g, answerServerRequest)
+			if err := send.do(c); !errors.Is(err, errClosed) {
+				t.Errorf("send = %v, want it to report the connection closed", err)
+			}
+			select {
+			case <-c.done:
+			default:
+				t.Error("the connection still looks alive after a write failed")
+			}
+			if err := send.do(c); !errors.Is(err, errClosed) {
+				t.Errorf("send again = %v, want the connection closed", err)
+			}
+			if err := c.close(); err != nil || g.closes != 1 {
+				t.Errorf("close = %v after %d closes of the stream, want nil and one", err, g.closes)
+			}
+		})
+	}
+}
