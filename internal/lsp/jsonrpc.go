@@ -50,7 +50,8 @@ type conn struct {
 	mu      sync.Mutex
 	nextID  int64
 	pending map[int64]chan *message
-	closed  bool
+	closed  bool          // close was called
+	ended   bool          // the stream was closed, by close or broken
 	err     error         // why the read loop stopped
 	done    chan struct{} // closed when the read loop stops
 
@@ -85,7 +86,8 @@ func (c *conn) call(ctx context.Context, method string, params, result any) erro
 
 	if err := c.write(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params}); err != nil {
 		c.forget(id)
-		return fmt.Errorf("lsp: send %s: %w", method, err)
+		c.broken()
+		return fmt.Errorf("lsp: send %s: %w", method, c.closeErr())
 	}
 
 	select {
@@ -114,7 +116,25 @@ func (c *conn) notify(method string, params any) error {
 	if err := c.usable(); err != nil {
 		return err
 	}
-	return c.write(map[string]any{"jsonrpc": "2.0", "method": method, "params": params})
+	if err := c.write(map[string]any{"jsonrpc": "2.0", "method": method, "params": params}); err != nil {
+		c.broken()
+		return fmt.Errorf("lsp: send %s: %w", method, c.closeErr())
+	}
+	return nil
+}
+
+// broken ends a connection whose stream a write failed on: the server has
+// gone. Closing the stream stops the read loop, so the connection reports
+// itself closed (Done) at once, rather than when the read loop notices.
+func (c *conn) broken() {
+	c.mu.Lock()
+	ended := c.ended
+	c.ended = true
+	c.mu.Unlock()
+	if !ended {
+		_ = c.rwc.Close()
+	}
+	<-c.done
 }
 
 // close closes the stream and fails every pending call.
@@ -125,8 +145,13 @@ func (c *conn) close() error {
 		return nil
 	}
 	c.closed = true
+	ended := c.ended
+	c.ended = true
 	c.mu.Unlock()
-	err := c.rwc.Close()
+	var err error
+	if !ended {
+		err = c.rwc.Close()
+	}
 	<-c.done
 	return err
 }
