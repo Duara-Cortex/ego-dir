@@ -154,10 +154,13 @@ the CLI, so a tool's text is byte for byte what the CLI prints.
   `isError: true` and the message as text, which the model can read and act on.
 - **Configuration is fixed.** `--root`, `--server`, `--timeout` and `--idle` are read once. Tool
   arguments are decoded strictly, so an argument the schema does not list (such as `root`)
-  is an error rather than ignored.
+  is an error rather than ignored. Without `--root`, the root is the current directory: it is
+  not detected from a file as the CLI's is, so the confinement boundary is never wider than
+  where the server was started.
 - **Confinement.** Every tool call sets `confine` on its request: `validate` refuses a file
   whose path, compared by name and again with symbolic links followed, is outside the root.
-  The CLI does not set it.
+  The CLI does not set it. A confined request always carries the server's root; one without a
+  root is refused rather than given a detected one.
 - **Concurrency.** Each `tools/call` runs in its own goroutine, so pings and cancellations
   are read while it runs. At most `MaxConcurrent` (default 4) run at once; the rest wait for
   a slot. Calls only read, and the warm server they share answers concurrent requests (the
@@ -267,6 +270,32 @@ sequenceDiagram
     P->>S: shutdown, exit
     M-->>A: exit 0
 ```
+
+## The workspace root
+
+The root is where the language server starts, and more: neighbours outside it are left out,
+ids and paths in the output are relative to it, and Python's companions are searched for under
+it. With `--root`, it is that directory, and a relative `--file` is relative to it. Without, a
+relative `--file` is relative to the current directory, and the root is detected from the file
+(`detectRoot` in `cmd/ego-dir/root.go`), so a run from a subdirectory keeps its callers in
+other packages and gives the same ids as a run from the project's top:
+
+- Walk up from the file's directory, by name (symbolic links are not resolved, so the root is
+  spelt as the file's path is). At each directory, look for the markers of the file's language
+  (`lsp.RootMarkers`, by extension, beside its default server), then for `.git`, a directory or
+  a worktree's or submodule's file. The first directory with either is the root.
+- So the nearest marker wins: `testdata/sample/go.mod` makes `testdata/sample` the root of
+  `shapes.go` inside this repository, and a module below a `go.work`, or a crate in a Cargo
+  workspace, is its own root. A workspace's members would need its file parsed; nearest is
+  predictable, keeps the server's load small, and `--root` widens it.
+- Markers are per language, so a `.py` file does not stop at a `go.mod`. An unknown extension
+  (with `--server`) looks for `.git` only. `.git` bounds the walk: a marker above a
+  repository's top, such as a stray `go.mod` in a home directory, is never used.
+- With neither found, the root is the file's directory, which always contains the file and
+  does not depend on where ego-dir runs.
+
+Nothing reports the detected root: stdout carries only results, and stderr stays empty on
+success. `ego-dir mcp` does not detect its root (see above).
 
 ## Request flow for `inspect_ego`
 
@@ -424,7 +453,7 @@ a method reads as if it were at the top level.
 
 1. Nodes are de-duplicated by `(URI, Selection range)`, modules by their path.
 2. Nodes are sorted by `(Hop, URI, StartLine, StartCol, ID)`. Edges are sorted by `(From, To, Kind)`.
-3. Paths are rendered relative to `--root` using `/` separators.
+3. Paths are rendered relative to the root (`--root`, or the one detected from the file) using `/` separators.
 4. No timestamps, durations or absolute paths appear in output.
 5. Renderers are covered by golden-file tests (`testdata/*.golden`).
 

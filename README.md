@@ -117,7 +117,7 @@ ego-dir find_references    --file main.go --line 10 --col 6
 
 | Flag          | Default    | Meaning                                                                                                                             |
 |---------------|------------|-------------------------------------------------------------------------------------------------------------------------------------|
-| `--file`      | (required) | Path to the source file. Relative paths resolve against `--root`.                                                                   |
+| `--file`      | (required) | Path to the source file. Relative paths resolve against `--root` when it is given, otherwise against the current directory.          |
 | `--line`      | (required) | **1-based** line, as shown in editors.                                                                                              |
 | `--col`       | (required) | **1-based** column in characters (runes). Converted to LSP UTF-16 internally.                                                       |
 | `--depth`     | `1`        | Hop radius `k` (1–5).                                                                                                               |
@@ -125,9 +125,28 @@ ego-dir find_references    --file main.go --line 10 --col 6
 | `--edges`     | see note   | Comma list of `calls,implements,instantiates,imports,contains,references`, or `all`. Default: all except `contains` and `references`. |
 | `--direction` | `both`     | `in` (callers/upstream), `out` (callees/downstream) or `both`.                                                                      |
 | `--body`      | `ego`      | Include bodies for `ego`, `all` or `none`.                                                                                          |
-| `--root`      | cwd        | Workspace root passed to the language server. Alters outside it (standard library, module cache, sibling directories) are left out. |
+| `--root`      | detected   | Workspace root passed to the language server. Alters outside it (standard library, module cache, sibling directories) are left out. Ids and paths in the output are relative to it. See below. |
 | `--server`    | by ext     | Override the language server command.                                                                                               |
 | `--timeout`   | `30s`      | Overall deadline.                                                                                                                   |
+
+**The root, when `--root` is not given,** is the file's project, so the same position gives the
+same output from any directory. Ego-dir walks up from the file's directory and stops at the
+first directory holding a marker of the file's language, or a `.git` (a directory, or a file in
+a worktree or submodule). So the nearest marker wins, and nothing above a repository's top is
+used. Failing both, the root is the file's own directory.
+
+| Extension            | Markers                                                        |
+|----------------------|----------------------------------------------------------------|
+| `.go`                | `go.mod`, `go.work`                                            |
+| `.py`                | `pyproject.toml`, `setup.py`, `setup.cfg`, `pyrightconfig.json` |
+| `.rs`                | `Cargo.toml`                                                   |
+| `.ts .tsx .js .jsx`  | `package.json`                                                 |
+| `.php`               | `composer.json`                                                |
+
+A module inside a workspace (`go.mod` below a `go.work`, a crate in a Cargo workspace) is its
+own root, so callers in its sibling modules are left out: give `--root` to include them.
+The walk does not resolve symbolic links, so the root is spelt as the file's path is.
+`ego-dir mcp` does not detect its root (see below).
 
 Results go to stdout. Diagnostics go to stderr. The exit code is `0` on success, `1` on a
 usage error (bad flags, missing file, position outside the file) and `2` on an LSP or runtime
@@ -165,6 +184,9 @@ The arguments mean what the flags of the same name mean. `file` is relative to t
 
 - **Fixed configuration.** `--root`, `--server`, `--timeout` and `--idle` are set when the
   server starts. A tool call cannot change them: an argument the schema does not list is an error.
+- **The root defaults to the current directory.** Unlike the CLI, the server does not detect it,
+  because it bounds what tool calls may read: started in a subdirectory, it never widens to the
+  project above.
 - **Confined to the root.** A `file` that resolves outside `--root`, whether by `..`, an
   absolute path or a symbolic link, is refused.
 - **Read-only.** Every tool only asks the language server questions, and says so
