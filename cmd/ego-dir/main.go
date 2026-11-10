@@ -35,10 +35,14 @@ Commands:
   help                print this help
 
 Flags (all position commands):
-  --file PATH         source file, relative to --root (required)
+  --file PATH         source file, relative to --root if given, otherwise to
+                      the current directory (required)
   --line N            1-based line (required)
   --col N             1-based column, in characters (required)
-  --root DIR          workspace root (default: current directory)
+  --root DIR          workspace root (default: the file's project, the nearest
+                      directory above it with a marker of its language, such
+                      as go.mod or pyproject.toml, or else a .git; failing
+                      both, the file's directory)
   --server "CMD ARGS" language server command (default: chosen by file extension)
   --format md|json    output format (default: md)
   --timeout DURATION  overall deadline (default: 30s)
@@ -52,7 +56,8 @@ Flags (inspect_ego only):
 
 Flags (mcp), fixed for the server's lifetime:
   --root DIR          workspace root; tool calls cannot read outside it
-                      (default: current directory)
+                      (default: current directory, not detected, so the
+                      boundary is never wider than where it was started)
   --server "CMD ARGS" language server command (default: chosen by file extension)
   --timeout DURATION  deadline for each tool call (default: 30s)
   --idle DURATION     keep each language server running between calls, and

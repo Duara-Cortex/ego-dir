@@ -109,12 +109,25 @@ func (r request) validate() (*options, error) {
 	}
 
 	var err error
-	if o.root, err = absRoot(r.root); err != nil {
-		return nil, err
-	}
-	o.path = r.file
-	if !filepath.IsAbs(o.path) {
-		o.path = filepath.Join(o.root, o.path)
+	switch {
+	case r.root != "":
+		if o.root, err = absRoot(r.root); err != nil {
+			return nil, err
+		}
+		o.path = r.file
+		if !filepath.IsAbs(o.path) {
+			o.path = filepath.Join(o.root, o.path)
+		}
+	case r.confine:
+		// Confinement is to a root someone chose, never one the file picks.
+		return nil, usagef("a confined request needs a root")
+	default:
+		// No root: the file is relative to the current directory, and the
+		// root is the project it belongs to.
+		if o.path, err = filepath.Abs(r.file); err != nil {
+			return nil, usageError{err}
+		}
+		o.root = detectRoot(o.path)
 	}
 	if r.confine {
 		if err := insideRoot(o.root, o.path, r.file); err != nil {
@@ -179,6 +192,9 @@ func within(root, path string) bool {
 	return err == nil && !filepath.IsAbs(rel) && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
+// absRoot returns root as an absolute directory, or the current directory
+// when root is "". The MCP server takes that as its default root; a position
+// command without --root detects its root from the file instead.
 func absRoot(root string) (string, error) {
 	if root == "" {
 		wd, err := os.Getwd()

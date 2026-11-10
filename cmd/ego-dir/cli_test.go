@@ -340,7 +340,9 @@ func TestMoreUsageErrors(t *testing.T) {
 	}
 }
 
-func TestDefaultRootIsWorkingDirectory(t *testing.T) {
+// TestDefaultRootIsDetectedFromFile runs from the project root without --root:
+// the root found from shapes.go (its go.mod) is the current directory.
+func TestDefaultRootIsDetectedFromFile(t *testing.T) {
 	t.Chdir(sampleRoot(t))
 	r := cli(t, "resolve_definition", "--file", "shapes.go", "--line", "18", "--col", "6", "--server", os.Args[0])
 	if r.code != 0 || !strings.Contains(r.stdout, "- location: shapes.go:18:6") {

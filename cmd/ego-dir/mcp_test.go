@@ -25,6 +25,7 @@ type mcpSession struct {
 	lines  chan string
 	stderr *syncBuffer
 	exit   chan int
+	done   chan struct{} // closed when the server has returned
 	nextID int
 }
 
@@ -67,11 +68,12 @@ func launchMCP(t *testing.T, args ...string) *mcpSession {
 	t.Setenv(lspfake.EnvHelper, "sample")
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
-	s := &mcpSession{t: t, in: inW, lines: make(chan string, 16), stderr: &syncBuffer{}, exit: make(chan int, 1)}
+	s := &mcpSession{t: t, in: inW, lines: make(chan string, 16), stderr: &syncBuffer{}, exit: make(chan int, 1), done: make(chan struct{})}
 	go func() {
 		code := runWithInput(append([]string{"mcp"}, args...), inR, outW, s.stderr)
 		outW.Close()
 		s.exit <- code
+		close(s.done)
 	}()
 	go func() {
 		defer close(s.lines)
@@ -81,7 +83,17 @@ func launchMCP(t *testing.T, args ...string) *mcpSession {
 			s.lines <- sc.Text()
 		}
 	}()
-	t.Cleanup(func() { inW.Close() })
+	// Wait for the server, and so for the language servers it stops, to
+	// return: one still shutting down could write to a temporary directory
+	// (the fake's EnvLog) as the test removes it.
+	t.Cleanup(func() {
+		inW.Close()
+		select {
+		case <-s.done:
+		case <-time.After(30 * time.Second):
+			t.Error("ego-dir mcp did not exit after EOF")
+		}
+	})
 	return s
 }
 
